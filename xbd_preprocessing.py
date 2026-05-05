@@ -570,9 +570,25 @@ def debug_analyze_json(json_path: Path):
                 if isinstance(val, list):
                     print(f"    '{key}': list with {len(val)} items")
                     if val:
-                        print(f"      First item keys: {list(val[0].keys()) if isinstance(val[0], dict) else 'not a dict'}")
-                        if isinstance(val[0], dict) and 'properties' in val[0]:
-                            print(f"      Properties keys: {list(val[0]['properties'].keys())}")
+                        first_item = val[0]
+                        print(f"      First item keys: {list(first_item.keys()) if isinstance(first_item, dict) else 'not a dict'}")
+                        if isinstance(first_item, dict):
+                            # Show ALL keys at top level of feature
+                            print(f"      === FULL FIRST FEATURE STRUCTURE ===")
+                            for k, v in first_item.items():
+                                if isinstance(v, dict):
+                                    print(f"        '{k}': dict with keys {list(v.keys())}")
+                                elif isinstance(v, str) and len(v) > 100:
+                                    print(f"        '{k}': '{v[:100]}...' (truncated)")
+                                else:
+                                    print(f"        '{k}': {v}")
+                            if 'properties' in first_item:
+                                print(f"      === PROPERTIES ===")
+                                for pk, pv in first_item['properties'].items():
+                                    if isinstance(pv, str) and len(pv) > 100:
+                                        print(f"        '{pk}': '{pv[:100]}...' (truncated)")
+                                    else:
+                                        print(f"        '{pk}': {pv}")
         elif isinstance(feat, list):
             print(f"  'features' is a list with {len(feat)} items")
             if feat:
@@ -581,6 +597,11 @@ def debug_analyze_json(json_path: Path):
     # Try extracting features
     features = extract_features_from_json(json_data)
     print(f"  Extracted {len(features)} features")
+
+    # Show what we find in first feature with buildings
+    if features:
+        for i, f in enumerate(features[:3]):
+            print(f"  Feature {i} raw: {f}")
 
     if features:
         # Check first feature
@@ -739,8 +760,8 @@ def print_dataset_stats(stats: Dict, title: str = "DATASET STATISTICS"):
         stats: Dictionary with statistics
         title: Title for the statistics section
     """
-    if not stats:
-        print("[WARNING] No statistics available")
+    if not stats or 'total_tiles' not in stats:
+        print(f"\n[WARNING] No statistics available for {title}")
         return
 
     print("\n" + "="*60)
@@ -1007,10 +1028,21 @@ def preprocess_single_tier(input_path: Path,
 
     print(f"[INFO] Found {len(scenes)} complete scenes")
 
-    # Debug: Analyze first JSON to check structure
+    # Debug: Analyze JSON files to check structure - find one with features
     if verbose or debug:
-        first_scene = list(scenes.values())[0]
-        debug_analyze_json(first_scene['json'])
+        print("\n[DEBUG] Looking for a JSON with features to analyze...")
+        for scene_id, scene_files in list(scenes.items())[:20]:
+            json_data = load_json(scene_files['json'])
+            if json_data:
+                features = extract_features_from_json(json_data)
+                if features:
+                    print(f"[DEBUG] Found JSON with {len(features)} features: {scene_files['json']}")
+                    debug_analyze_json(scene_files['json'])
+                    break
+        else:
+            # If no JSON with features found, just show first one
+            first_scene = list(scenes.values())[0]
+            debug_analyze_json(first_scene['json'])
 
     if debug:
         scene_ids = list(scenes.keys())[:debug_limit]
