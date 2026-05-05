@@ -9,6 +9,7 @@ Features:
 - 512x512 tiling with building density filtering
 - Memory-efficient processing
 - Optional change/diff channel generation
+- Multi-tier processing (tier1 + tier3) with combined statistics
 
 Author: AI Assistant
 Environment: Kaggle
@@ -24,12 +25,14 @@ CHANGELOG:
 - Added coordinate safety checks
 - Added cv2.setNumThreads(0) for performance
 - Improved visualization with overlay
+- Added multi-tier processing support
+- Added combined statistics across tiers
 """
 
 import json
 from pathlib import Path
 from collections import defaultdict
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import random
 
 import numpy as np
@@ -50,12 +53,14 @@ cv2.setNumThreads(0)
 class Config:
     """Central configuration for preprocessing parameters."""
 
-    # Paths (Kaggle environment)
-    INPUT_PATH = Path("/kaggle/input/xview2-challenge-dataset")
+    # Paths (Kaggle environment) - Updated for multi-tier support
+    INPUT_BASE_PATH = Path("/kaggle/input/xview2-challenge-dataset")
     OUTPUT_PATH = Path("/kaggle/working/processed_data")
 
+    # Available tiers
+    TIERS = ["tier1", "tier3"]
+
     # Image parameters
-    # [FIX #4] IMAGE_SIZE is now only used as fallback, actual size is read from image
     DEFAULT_IMAGE_SIZE = 1024  # Fallback only
     TILE_SIZE = 512
     TILE_STRIDE = 512  # No overlap
@@ -72,6 +77,15 @@ class Config:
         "un-classified": 0,  # Treat as background
     }
 
+    # Damage class names for display
+    CLASS_NAMES = {
+        0: "Background",
+        1: "No Damage",
+        2: "Minor",
+        3: "Major",
+        4: "Destroyed"
+    }
+
     # [FIX #2] Damage priority for mask overwrite (higher value = higher priority)
     DAMAGE_PRIORITY = {
         0: 0,  # Background - lowest
@@ -84,7 +98,7 @@ class Config:
     # Debug mode
     DEBUG_LIMIT = 10  # Process only N scenes in debug mode
 
-    # [FIX #7] Optional change channel
+    # Optional change channel
     SAVE_DIFF_CHANNEL = True  # Set to True to save diff tiles
 
 
@@ -123,11 +137,9 @@ def extract_scene_id(filename: str) -> str:
     Returns:
         Scene ID string
     """
-    # Remove extension and split by '_'
     name = Path(filename).stem
     parts = name.split('_')
 
-    # Scene ID is everything before 'pre' or 'post'
     scene_parts = []
     for part in parts:
         if part in ('pre', 'post'):
@@ -156,17 +168,14 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
         if geom.is_empty:
             return polygons
 
-        # [FIX #1] Handle both Polygon and MultiPolygon - process ALL polygons
         if geom.geom_type == 'Polygon':
             coords = np.array(geom.exterior.coords)
             polygons.append(coords)
         elif geom.geom_type == 'MultiPolygon':
-            # [FIX #1] CRITICAL: Process ALL polygons, not just largest
             for poly in geom.geoms:
                 if not poly.is_empty:
                     coords = np.array(poly.exterior.coords)
                     polygons.append(coords)
-        # Handle GeometryCollection (rare but possible)
         elif geom.geom_type == 'GeometryCollection':
             for g in geom.geoms:
                 if g.geom_type == 'Polygon' and not g.is_empty:
@@ -174,7 +183,6 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
                     polygons.append(coords)
 
     except Exception as e:
-        # Silently handle malformed WKT
         pass
 
     return polygons
@@ -183,7 +191,6 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
 def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
     """
     [FIX #4 & #8] Clip polygon coordinates to image bounds.
-    Now takes separate height and width parameters.
 
     Args:
         coords: Numpy array of coordinates (N, 2) in (x, y) format
@@ -193,10 +200,9 @@ def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
     Returns:
         Clipped coordinates as int32
     """
-    # [FIX #8] Ensure coordinates are within bounds and converted to int32
     clipped = coords.copy()
-    clipped[:, 0] = np.clip(coords[:, 0], 0, width - 1)   # x coordinates
-    clipped[:, 1] = np.clip(coords[:, 1], 0, height - 1)  # y coordinates
+    clipped[:, 0] = np.clip(coords[:, 0], 0, width - 1)
+    clipped[:, 1] = np.clip(coords[:, 1], 0, height - 1)
     return clipped.astype(np.int32)
 
 
@@ -206,11 +212,7 @@ def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
 
 def create_mask(json_data: Dict, height: int, width: int) -> np.ndarray:
     """
-    [FIX #1, #2, #3, #4] Create segmentation mask from JSON label data.
-    - Processes ALL polygons in MultiPolygon
-    - Higher damage classes overwrite lower ones
-    - Robust JSON parsing with validation
-    - Dynamic image size
+    Create segmentation mask from JSON label data.
 
     Args:
         json_data: Parsed JSON dictionary with building annotations
@@ -223,116 +225,45 @@ def create_mask(json_data: Dict, height: int, width: int) -> np.ndarray:
     """
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    # Get features from JSON
     features = json_data.get('features', {}).get('xy', [])
 
     if not features:
         return mask
 
-    # [FIX #2] Collect all polygons with their damage classes
     polygon_data = []
 
     for feature in features:
         properties = feature.get('properties', {})
 
-        # [FIX #3] Robust JSON parsing - skip if subtype is missing
         if 'subtype' not in properties:
             continue
 
         damage_type = properties.get('subtype', '')
 
-        # [FIX #3] Skip if damage type is empty or not recognized
         if not damage_type or damage_type not in Config.DAMAGE_CLASSES:
             continue
 
         damage_class = Config.DAMAGE_CLASSES.get(damage_type, 0)
 
-        # Skip background/unclassified
         if damage_class == 0:
             continue
 
-        # [FIX #3] Skip if feature_wkt is missing or empty
         wkt_string = properties.get('feature_wkt', '')
         if not wkt_string or not wkt_string.strip():
             continue
 
-        # [FIX #1] Parse ALL polygons from WKT
         polygons = parse_polygons_from_wkt(wkt_string)
 
         for coords in polygons:
             if coords is not None and len(coords) >= 3:
                 polygon_data.append((coords, damage_class))
 
-    # [FIX #2] Sort by damage class (ascending) so higher classes are drawn last
-    # This ensures destroyed (4) overwrites major (3) overwrites minor (2), etc.
     polygon_data.sort(key=lambda x: Config.DAMAGE_PRIORITY[x[1]])
 
-    # Draw polygons in sorted order
     for coords, damage_class in polygon_data:
-        # [FIX #4 & #8] Clip to actual image bounds
         coords = clip_coordinates(coords, height, width)
-
-        # Reshape for cv2.fillPoly: expects (N, 1, 2)
         polygon = coords.reshape((-1, 1, 2))
-
-        # Fill polygon on mask
         cv2.fillPoly(mask, [polygon], color=int(damage_class))
-
-    return mask
-
-
-def create_mask_with_priority(json_data: Dict, height: int, width: int) -> np.ndarray:
-    """
-    [FIX #2 Alternative] Create segmentation mask using np.maximum for priority.
-    This method guarantees higher damage classes always win, even with overlaps.
-
-    Args:
-        json_data: Parsed JSON dictionary with building annotations
-        height: Output mask height
-        width: Output mask width
-
-    Returns:
-        Numpy array mask of shape (height, width)
-    """
-    mask = np.zeros((height, width), dtype=np.uint8)
-
-    features = json_data.get('features', {}).get('xy', [])
-
-    if not features:
-        return mask
-
-    for feature in features:
-        properties = feature.get('properties', {})
-
-        # [FIX #3] Robust validation
-        if 'subtype' not in properties:
-            continue
-
-        damage_type = properties.get('subtype', '')
-        if not damage_type or damage_type not in Config.DAMAGE_CLASSES:
-            continue
-
-        damage_class = Config.DAMAGE_CLASSES.get(damage_type, 0)
-        if damage_class == 0:
-            continue
-
-        wkt_string = properties.get('feature_wkt', '')
-        if not wkt_string or not wkt_string.strip():
-            continue
-
-        polygons = parse_polygons_from_wkt(wkt_string)
-
-        for coords in polygons:
-            if coords is not None and len(coords) >= 3:
-                coords = clip_coordinates(coords, height, width)
-                polygon = coords.reshape((-1, 1, 2))
-
-                # [FIX #2] Create temporary mask for this polygon
-                temp_mask = np.zeros((height, width), dtype=np.uint8)
-                cv2.fillPoly(temp_mask, [polygon], color=int(damage_class))
-
-                # [FIX #2] Use np.maximum to ensure higher damage class wins
-                mask = np.maximum(mask, temp_mask)
 
     return mask
 
@@ -340,7 +271,6 @@ def create_mask_with_priority(json_data: Dict, height: int, width: int) -> np.nd
 def create_building_mask(json_data: Dict, height: int, width: int) -> np.ndarray:
     """
     Create binary building mask (for localization task).
-    [FIX #4] Now uses dynamic image size.
 
     Args:
         json_data: Parsed JSON dictionary
@@ -357,17 +287,14 @@ def create_building_mask(json_data: Dict, height: int, width: int) -> np.ndarray
     for feature in features:
         properties = feature.get('properties', {})
 
-        # [FIX #3] Skip if feature_wkt is missing
         wkt_string = properties.get('feature_wkt', '')
         if not wkt_string or not wkt_string.strip():
             continue
 
-        # [FIX #1] Get all polygons
         polygons = parse_polygons_from_wkt(wkt_string)
 
         for coords in polygons:
             if coords is not None and len(coords) >= 3:
-                # [FIX #4 & #8] Clip to actual bounds
                 coords = clip_coordinates(coords, height, width)
                 polygon = coords.reshape((-1, 1, 2))
                 cv2.fillPoly(mask, [polygon], color=1)
@@ -383,7 +310,7 @@ def tile_image(image: np.ndarray,
                tile_size: int = 512,
                stride: int = 512) -> Dict[Tuple[int, int], np.ndarray]:
     """
-    [FIX #5] Split image into tiles with index-based dictionary for safe matching.
+    Split image into tiles with index-based dictionary for safe matching.
 
     Args:
         image: Input image (H, W) or (H, W, C)
@@ -403,7 +330,6 @@ def tile_image(image: np.ndarray,
             else:
                 tile = image[y:y+tile_size, x:x+tile_size]
 
-            # [FIX #5] Use tuple key for safe matching
             tiles[(row_idx, col_idx)] = tile
 
     return tiles
@@ -411,8 +337,7 @@ def tile_image(image: np.ndarray,
 
 def compute_building_ratio(mask_tile: np.ndarray) -> float:
     """
-    [FIX #6] Compute ratio of building pixels in a tile.
-    Now uses np.sum(mask > 0) instead of np.count_nonzero.
+    Compute ratio of building pixels in a tile.
 
     Args:
         mask_tile: Tile from damage mask
@@ -421,7 +346,6 @@ def compute_building_ratio(mask_tile: np.ndarray) -> float:
         Ratio of non-zero (building) pixels
     """
     total_pixels = mask_tile.size
-    # [FIX #6] Use np.sum(mask > 0) for explicit building pixel count
     building_pixels = np.sum(mask_tile > 0)
     return building_pixels / total_pixels
 
@@ -432,7 +356,7 @@ def compute_building_ratio(mask_tile: np.ndarray) -> float:
 
 def compute_change_image(pre_img: np.ndarray, post_img: np.ndarray) -> np.ndarray:
     """
-    [FIX #7] Compute absolute difference between pre and post images.
+    Compute absolute difference between pre and post images.
 
     Args:
         pre_img: Pre-disaster image (H, W, C)
@@ -463,28 +387,23 @@ def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
     images_dir = data_path / "images"
     labels_dir = data_path / "labels"
 
-    # Check if directories exist
     if not images_dir.exists():
         print(f"[ERROR] Images directory not found: {images_dir}")
         return {}
 
-    # Discover pre-disaster images
     for img_path in images_dir.glob("*_pre_disaster.png"):
         scene_id = extract_scene_id(img_path.name)
         scenes[scene_id]['pre'] = img_path
 
-    # Discover post-disaster images
     for img_path in images_dir.glob("*_post_disaster.png"):
         scene_id = extract_scene_id(img_path.name)
         scenes[scene_id]['post'] = img_path
 
-    # Discover JSON labels
     if labels_dir.exists():
         for json_path in labels_dir.glob("*_post_disaster.json"):
             scene_id = extract_scene_id(json_path.name)
             scenes[scene_id]['json'] = json_path
 
-    # Filter to only complete scenes
     complete_scenes = {
         scene_id: files
         for scene_id, files in scenes.items()
@@ -505,25 +424,23 @@ def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
 def process_scene(scene_id: str,
                   files: Dict[str, Path],
                   output_dirs: Dict[str, Path],
-                  save_diff: bool = False) -> int:
+                  save_diff: bool = False,
+                  tier_prefix: str = "") -> int:
     """
-    [FIX #4, #5, #7] Process a single scene: load, create mask, tile, and save.
-    - Dynamic image size (no fixed 1024 assumption)
-    - Safe tile matching via index-based approach
-    - Optional diff channel saving
+    Process a single scene: load, create mask, tile, and save.
 
     Args:
         scene_id: Scene identifier
         files: Dictionary with 'pre', 'post', 'json' paths
-        output_dirs: Dictionary with 'pre', 'post', 'masks', optionally 'diff' output paths
+        output_dirs: Dictionary with output paths
         save_diff: Whether to save diff channel
+        tier_prefix: Prefix to add to filenames (e.g., "tier1_")
 
     Returns:
         Number of tiles saved
     """
     tiles_saved = 0
 
-    # Load images
     pre_img = cv2.imread(str(files['pre']))
     post_img = cv2.imread(str(files['post']))
 
@@ -531,28 +448,22 @@ def process_scene(scene_id: str,
         print(f"[WARNING] Failed to load images for {scene_id}")
         return 0
 
-    # [FIX #4] Get actual image dimensions
     height, width = pre_img.shape[:2]
 
-    # Convert BGR to RGB
     pre_img = cv2.cvtColor(pre_img, cv2.COLOR_BGR2RGB)
     post_img = cv2.cvtColor(post_img, cv2.COLOR_BGR2RGB)
 
-    # [FIX #7] Compute change/diff image if needed
     diff_img = None
     if save_diff:
         diff_img = compute_change_image(pre_img, post_img)
 
-    # Load JSON and create mask
     json_data = load_json(files['json'])
 
     if json_data is None:
         return 0
 
-    # [FIX #4] Pass actual image dimensions to mask creation
     mask = create_mask(json_data, height, width)
 
-    # [FIX #5] Tile images and mask with index-based dictionary
     pre_tiles = tile_image(pre_img, Config.TILE_SIZE, Config.TILE_STRIDE)
     post_tiles = tile_image(post_img, Config.TILE_SIZE, Config.TILE_STRIDE)
     mask_tiles = tile_image(mask, Config.TILE_SIZE, Config.TILE_STRIDE)
@@ -561,25 +472,21 @@ def process_scene(scene_id: str,
     if save_diff and diff_img is not None:
         diff_tiles = tile_image(diff_img, Config.TILE_SIZE, Config.TILE_STRIDE)
 
-    # [FIX #5] Process each tile using index-based matching
     for (row, col), pre_tile in pre_tiles.items():
-        # [FIX #5] Safe matching - verify indices exist in all tile dicts
         if (row, col) not in post_tiles or (row, col) not in mask_tiles:
             continue
 
         post_tile = post_tiles[(row, col)]
         mask_tile = mask_tiles[(row, col)]
 
-        # [FIX #6] Check building density with corrected method
         building_ratio = compute_building_ratio(mask_tile)
 
         if building_ratio < Config.MIN_BUILDING_RATIO:
             continue
 
-        # Generate filename
-        tile_name = f"{scene_id}_tile_{row}_{col}.png"
+        # Add tier prefix to filename for unique identification
+        tile_name = f"{tier_prefix}{scene_id}_tile_{row}_{col}.png"
 
-        # Save tiles (convert RGB back to BGR for cv2)
         cv2.imwrite(
             str(output_dirs['pre'] / tile_name),
             cv2.cvtColor(pre_tile, cv2.COLOR_RGB2BGR)
@@ -593,7 +500,6 @@ def process_scene(scene_id: str,
             mask_tile
         )
 
-        # [FIX #7] Save diff tile if enabled
         if save_diff and diff_tiles is not None and (row, col) in diff_tiles:
             diff_tile = diff_tiles[(row, col)]
             cv2.imwrite(
@@ -607,41 +513,128 @@ def process_scene(scene_id: str,
 
 
 # ============================================================================
+# STATISTICS
+# ============================================================================
+
+def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
+    """
+    Compute statistics about the processed dataset.
+
+    Args:
+        output_dirs: Dictionary with output directory paths
+
+    Returns:
+        Dictionary with statistics
+    """
+    tile_files = list(output_dirs['masks'].glob("*.png"))
+
+    if not tile_files:
+        return {}
+
+    class_counts = defaultdict(int)
+    total_pixels = 0
+
+    for mask_path in tqdm(tile_files, desc="Computing statistics"):
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        unique, counts = np.unique(mask, return_counts=True)
+
+        for cls, cnt in zip(unique, counts):
+            class_counts[cls] += cnt
+            total_pixels += cnt
+
+    return {
+        'total_tiles': len(tile_files),
+        'total_pixels': total_pixels,
+        'class_counts': dict(class_counts)
+    }
+
+
+def print_dataset_stats(stats: Dict, title: str = "DATASET STATISTICS"):
+    """
+    Print statistics about the processed dataset.
+
+    Args:
+        stats: Dictionary with statistics
+        title: Title for the statistics section
+    """
+    if not stats:
+        print("[WARNING] No statistics available")
+        return
+
+    print("\n" + "="*60)
+    print(title)
+    print("="*60)
+    print(f"Total tiles: {stats['total_tiles']:,}")
+    print(f"\nDamage class distribution:")
+
+    total_pixels = stats['total_pixels']
+    class_counts = stats['class_counts']
+
+    for cls in sorted(class_counts.keys()):
+        count = class_counts[cls]
+        percentage = (count / total_pixels) * 100
+        class_name = Config.CLASS_NAMES.get(cls, f'Class {cls}')
+        print(f"  {class_name}: {count:,} pixels ({percentage:.2f}%)")
+
+
+def merge_stats(stats_list: List[Dict]) -> Dict:
+    """
+    Merge statistics from multiple tiers.
+
+    Args:
+        stats_list: List of statistics dictionaries
+
+    Returns:
+        Merged statistics dictionary
+    """
+    merged = {
+        'total_tiles': 0,
+        'total_pixels': 0,
+        'class_counts': defaultdict(int)
+    }
+
+    for stats in stats_list:
+        if stats:
+            merged['total_tiles'] += stats['total_tiles']
+            merged['total_pixels'] += stats['total_pixels']
+            for cls, count in stats['class_counts'].items():
+                merged['class_counts'][cls] += count
+
+    merged['class_counts'] = dict(merged['class_counts'])
+    return merged
+
+
+# ============================================================================
 # VISUALIZATION
 # ============================================================================
 
 def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_diff: bool = False):
     """
-    [FIX #10] Display random samples for visual verification.
-    Now includes overlay visualization.
+    Display random samples for visual verification.
 
     Args:
         output_dirs: Dictionary with output directory paths
         num_samples: Number of samples to display
         show_diff: Whether to show diff channel
     """
-    # Get list of processed tiles
     tile_files = list(output_dirs['pre'].glob("*.png"))
 
     if not tile_files:
         print("[WARNING] No processed tiles found for visualization")
         return
 
-    # Random sample
     samples = random.sample(tile_files, min(num_samples, len(tile_files)))
 
-    # Color map for damage classes
     damage_colors = {
-        0: [0, 0, 0],        # Background - black
-        1: [0, 255, 0],      # No damage - green
-        2: [255, 255, 0],    # Minor - yellow
-        3: [255, 165, 0],    # Major - orange
-        4: [255, 0, 0],      # Destroyed - red
+        0: [0, 0, 0],
+        1: [0, 255, 0],
+        2: [255, 255, 0],
+        3: [255, 165, 0],
+        4: [255, 0, 0],
     }
 
-    # [FIX #10] Determine number of columns based on whether diff is shown
     has_diff = show_diff and 'diff' in output_dirs and output_dirs['diff'].exists()
-    num_cols = 5 if has_diff else 4  # pre, post, mask, overlay (+ diff if enabled)
+    num_cols = 5 if has_diff else 4
 
     fig, axes = plt.subplots(num_samples, num_cols, figsize=(4 * num_cols, 5 * num_samples))
 
@@ -651,7 +644,6 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
     for idx, pre_path in enumerate(samples):
         tile_name = pre_path.name
 
-        # Load all images
         pre_img = cv2.imread(str(output_dirs['pre'] / tile_name))
         pre_img = cv2.cvtColor(pre_img, cv2.COLOR_BGR2RGB)
 
@@ -660,44 +652,37 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
 
         mask = cv2.imread(str(output_dirs['masks'] / tile_name), cv2.IMREAD_GRAYSCALE)
 
-        # Create colored mask for visualization
         colored_mask = np.zeros((*mask.shape, 3), dtype=np.uint8)
         for class_id, color in damage_colors.items():
             colored_mask[mask == class_id] = color
 
-        # [FIX #10] Create overlay visualization
         overlay = post_img.copy()
-        alpha = 0.4  # Transparency for overlay
+        alpha = 0.4
 
         for class_id, color in damage_colors.items():
-            if class_id == 0:  # Skip background
+            if class_id == 0:
                 continue
             mask_region = (mask == class_id)
             overlay[mask_region] = (
                 (1 - alpha) * overlay[mask_region] + alpha * np.array(color)
             ).astype(np.uint8)
 
-        # Plot pre-disaster
         axes[idx, 0].imshow(pre_img)
         axes[idx, 0].set_title(f"Pre-Disaster\n{tile_name[:30]}...")
         axes[idx, 0].axis('off')
 
-        # Plot post-disaster
         axes[idx, 1].imshow(post_img)
         axes[idx, 1].set_title("Post-Disaster")
         axes[idx, 1].axis('off')
 
-        # Plot colored mask
         axes[idx, 2].imshow(colored_mask)
         axes[idx, 2].set_title("Damage Mask")
         axes[idx, 2].axis('off')
 
-        # [FIX #10] Plot overlay
         axes[idx, 3].imshow(overlay)
         axes[idx, 3].set_title("Overlay (Post + Mask)")
         axes[idx, 3].axis('off')
 
-        # [FIX #7] Plot diff if available
         if has_diff:
             diff_path = output_dirs['diff'] / tile_name
             if diff_path.exists():
@@ -709,7 +694,6 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
                 axes[idx, 4].text(0.5, 0.5, "N/A", ha='center', va='center')
             axes[idx, 4].axis('off')
 
-    # Add legend
     legend_elements = [
         plt.Rectangle((0, 0), 1, 1, facecolor=np.array(c)/255, label=l)
         for l, c in [
@@ -729,47 +713,248 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
     print(f"[INFO] Visualization saved to {output_dirs['pre'].parent / 'sample_visualization.png'}")
 
 
-def print_dataset_stats(output_dirs: Dict[str, Path]):
+def print_class_weights(stats: Dict):
     """
-    Print statistics about the processed dataset.
+    Calculate and print recommended class weights for training.
 
     Args:
-        output_dirs: Dictionary with output directory paths
+        stats: Dataset statistics dictionary
     """
-    tile_files = list(output_dirs['masks'].glob("*.png"))
-
-    if not tile_files:
-        print("[WARNING] No processed tiles found")
+    if not stats or not stats.get('class_counts'):
         return
 
-    # Count damage class distribution
-    class_counts = defaultdict(int)
-    total_pixels = 0
+    print("\n" + "="*60)
+    print("RECOMMENDED CLASS WEIGHTS (for imbalanced training)")
+    print("="*60)
 
-    for mask_path in tqdm(tile_files, desc="Computing statistics"):
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-        unique, counts = np.unique(mask, return_counts=True)
+    class_counts = stats['class_counts']
 
-        for cls, cnt in zip(unique, counts):
-            class_counts[cls] += cnt
-            total_pixels += cnt
+    # Remove background for weight calculation (or keep if needed)
+    building_classes = {k: v for k, v in class_counts.items() if k > 0}
 
-    print("\n" + "="*50)
-    print("DATASET STATISTICS")
-    print("="*50)
-    print(f"Total tiles: {len(tile_files)}")
-    print(f"\nDamage class distribution:")
+    if not building_classes:
+        print("[WARNING] No building classes found")
+        return
 
-    class_names = {0: "Background", 1: "No Damage", 2: "Minor", 3: "Major", 4: "Destroyed"}
+    total_building_pixels = sum(building_classes.values())
+    num_classes = len(building_classes)
 
-    for cls in sorted(class_counts.keys()):
-        count = class_counts[cls]
-        percentage = (count / total_pixels) * 100
-        print(f"  {class_names.get(cls, f'Class {cls}')}: {count:,} pixels ({percentage:.2f}%)")
+    print("\nMethod 1: Inverse Frequency")
+    print("-" * 40)
+    weights_inv = {}
+    for cls, count in sorted(building_classes.items()):
+        weight = total_building_pixels / (num_classes * count)
+        weights_inv[cls] = weight
+        print(f"  Class {cls} ({Config.CLASS_NAMES[cls]}): {weight:.4f}")
+
+    print("\nMethod 2: Effective Number of Samples (beta=0.99)")
+    print("-" * 40)
+    beta = 0.99
+    weights_eff = {}
+    for cls, count in sorted(building_classes.items()):
+        effective_num = (1 - beta**count) / (1 - beta)
+        weight = (1 - beta) / (1 - beta**count)
+        weights_eff[cls] = weight
+        print(f"  Class {cls} ({Config.CLASS_NAMES[cls]}): {weight:.6f}")
+
+    # Normalize weights
+    print("\nNormalized Weights (sum=num_classes):")
+    print("-" * 40)
+    weight_sum = sum(weights_inv.values())
+    for cls, weight in sorted(weights_inv.items()):
+        normalized = (weight / weight_sum) * num_classes
+        print(f"  Class {cls} ({Config.CLASS_NAMES[cls]}): {normalized:.4f}")
 
 
 # ============================================================================
-# MAIN PROCESSING PIPELINE
+# SINGLE TIER PROCESSING
+# ============================================================================
+
+def preprocess_single_tier(input_path: Path,
+                           output_path: Path,
+                           tier_name: str,
+                           debug: bool = False,
+                           debug_limit: int = None,
+                           save_diff: bool = True) -> Dict:
+    """
+    Process a single tier of the dataset.
+
+    Args:
+        input_path: Path to tier data
+        output_path: Output path for processed data
+        tier_name: Name of the tier (e.g., "tier1")
+        debug: Enable debug mode
+        debug_limit: Number of scenes in debug mode
+        save_diff: Save diff channel
+
+    Returns:
+        Statistics dictionary for this tier
+    """
+    debug_limit = debug_limit or Config.DEBUG_LIMIT
+
+    print("\n" + "="*60)
+    print(f"PROCESSING {tier_name.upper()}")
+    print("="*60)
+    print(f"Input path: {input_path}")
+    print(f"Output path: {output_path}")
+    print(f"Debug mode: {debug} (limit: {debug_limit if debug else 'N/A'})")
+    print("="*60)
+
+    # Create output directories
+    output_dirs = {
+        'pre': output_path / 'pre',
+        'post': output_path / 'post',
+        'masks': output_path / 'masks',
+    }
+
+    if save_diff:
+        output_dirs['diff'] = output_path / 'diff'
+
+    for dir_path in output_dirs.values():
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    # Discover scenes
+    print("\n[INFO] Discovering scenes...")
+    scenes = discover_scenes(input_path)
+
+    if not scenes:
+        print(f"[ERROR] No complete scenes found in {tier_name}!")
+        return {}
+
+    print(f"[INFO] Found {len(scenes)} complete scenes")
+
+    if debug:
+        scene_ids = list(scenes.keys())[:debug_limit]
+        scenes = {sid: scenes[sid] for sid in scene_ids}
+        print(f"[DEBUG] Processing {len(scenes)} scenes only")
+
+    # Process scenes with tier prefix
+    total_tiles = 0
+    tier_prefix = f"{tier_name}_"
+
+    for scene_id, files in tqdm(scenes.items(), desc=f"Processing {tier_name}"):
+        try:
+            tiles_saved = process_scene(
+                scene_id, files, output_dirs,
+                save_diff=save_diff,
+                tier_prefix=tier_prefix
+            )
+            total_tiles += tiles_saved
+        except Exception as e:
+            print(f"\n[ERROR] Failed to process {scene_id}: {e}")
+            continue
+
+    print(f"\n[INFO] {tier_name} processing complete!")
+    print(f"[INFO] Tiles saved: {total_tiles}")
+
+    # Compute statistics
+    stats = compute_dataset_stats(output_dirs)
+    stats['tier'] = tier_name
+    stats['scenes_processed'] = len(scenes)
+
+    return stats
+
+
+# ============================================================================
+# MULTI-TIER PROCESSING
+# ============================================================================
+
+def preprocess_all_tiers(input_base_path: Path = None,
+                         output_path: Path = None,
+                         tiers: List[str] = None,
+                         debug: bool = False,
+                         debug_limit: int = None,
+                         save_diff: bool = True,
+                         visualize: bool = True):
+    """
+    Process all tiers and output combined statistics.
+
+    Args:
+        input_base_path: Base path containing tier directories
+        output_path: Output path for processed data
+        tiers: List of tier names to process
+        debug: Enable debug mode
+        debug_limit: Number of scenes per tier in debug mode
+        save_diff: Save diff channel
+        visualize: Show sample visualizations
+    """
+    input_base_path = input_base_path or Config.INPUT_BASE_PATH
+    output_path = output_path or Config.OUTPUT_PATH
+    tiers = tiers or Config.TIERS
+
+    print("="*60)
+    print("xBD MULTI-TIER DATASET PREPROCESSING")
+    print("="*60)
+    print(f"Input base path: {input_base_path}")
+    print(f"Output path: {output_path}")
+    print(f"Tiers to process: {tiers}")
+    print(f"Save diff channel: {save_diff}")
+    print("="*60)
+
+    all_stats = []
+    combined_output_dirs = None
+
+    for tier in tiers:
+        tier_input_path = input_base_path / tier
+        tier_output_path = output_path / "combined"  # All tiers go to same output
+
+        if not tier_input_path.exists():
+            print(f"\n[WARNING] Tier path not found: {tier_input_path}")
+            continue
+
+        stats = preprocess_single_tier(
+            input_path=tier_input_path,
+            output_path=tier_output_path,
+            tier_name=tier,
+            debug=debug,
+            debug_limit=debug_limit,
+            save_diff=save_diff
+        )
+
+        if stats:
+            all_stats.append(stats)
+            # Store output dirs for visualization
+            combined_output_dirs = {
+                'pre': tier_output_path / 'pre',
+                'post': tier_output_path / 'post',
+                'masks': tier_output_path / 'masks',
+            }
+            if save_diff:
+                combined_output_dirs['diff'] = tier_output_path / 'diff'
+
+    # Print individual tier statistics
+    for stats in all_stats:
+        print_dataset_stats(stats, f"{stats['tier'].upper()} STATISTICS")
+
+    # Print combined statistics
+    if len(all_stats) > 1:
+        combined_stats = merge_stats(all_stats)
+        print_dataset_stats(combined_stats, "COMBINED STATISTICS (ALL TIERS)")
+        print_class_weights(combined_stats)
+    elif len(all_stats) == 1:
+        print_class_weights(all_stats[0])
+
+    # Visualize samples from combined output
+    if visualize and combined_output_dirs:
+        print("\n[INFO] Generating visualization...")
+        visualize_samples(combined_output_dirs, num_samples=3, show_diff=save_diff)
+
+    # Save statistics to JSON
+    if all_stats:
+        stats_output = {
+            'tiers': [s['tier'] for s in all_stats],
+            'individual': all_stats,
+            'combined': merge_stats(all_stats) if len(all_stats) > 1 else all_stats[0]
+        }
+
+        stats_file = output_path / "combined" / "dataset_statistics.json"
+        with open(stats_file, 'w') as f:
+            json.dump(stats_output, f, indent=2)
+        print(f"\n[INFO] Statistics saved to {stats_file}")
+
+
+# ============================================================================
+# LEGACY SINGLE SPLIT PROCESSING (for backward compatibility)
 # ============================================================================
 
 def preprocess_dataset(input_path: Path = None,
@@ -780,85 +965,38 @@ def preprocess_dataset(input_path: Path = None,
                        visualize: bool = True,
                        save_diff: bool = None):
     """
-    Main preprocessing pipeline.
-    [FIX #7] Added save_diff parameter for optional change channel.
-
-    Args:
-        input_path: Path to xBD dataset (default: Config.INPUT_PATH)
-        output_path: Path for processed output (default: Config.OUTPUT_PATH)
-        split: Dataset split to process ('train', 'test', 'hold')
-        debug: Enable debug mode (process limited scenes)
-        debug_limit: Number of scenes to process in debug mode
-        visualize: Show sample visualizations after processing
-        save_diff: Save difference/change channel (default: Config.SAVE_DIFF_CHANNEL)
+    Legacy function for single split processing.
+    For multi-tier processing, use preprocess_all_tiers() instead.
     """
-    # Set paths
-    input_path = input_path or Config.INPUT_PATH
+    input_path = input_path or Config.INPUT_BASE_PATH
     output_path = output_path or Config.OUTPUT_PATH
     debug_limit = debug_limit or Config.DEBUG_LIMIT
     save_diff = save_diff if save_diff is not None else Config.SAVE_DIFF_CHANNEL
 
     data_path = input_path / split
 
-    print("="*60)
-    print("xBD DATASET PREPROCESSING")
-    print("="*60)
-    print(f"Input path: {data_path}")
-    print(f"Output path: {output_path / split}")
-    print(f"Debug mode: {debug} (limit: {debug_limit if debug else 'N/A'})")
-    print(f"Save diff channel: {save_diff}")
-    print("="*60)
+    stats = preprocess_single_tier(
+        input_path=data_path,
+        output_path=output_path / split,
+        tier_name=split,
+        debug=debug,
+        debug_limit=debug_limit,
+        save_diff=save_diff
+    )
 
-    # Create output directories
-    output_dirs = {
-        'pre': output_path / split / 'pre',
-        'post': output_path / split / 'post',
-        'masks': output_path / split / 'masks',
-    }
+    if stats:
+        print_dataset_stats(stats)
+        print_class_weights(stats)
 
-    # [FIX #7] Add diff directory if enabled
-    if save_diff:
-        output_dirs['diff'] = output_path / split / 'diff'
+    if visualize and stats.get('total_tiles', 0) > 0:
+        output_dirs = {
+            'pre': output_path / split / 'pre',
+            'post': output_path / split / 'post',
+            'masks': output_path / split / 'masks',
+        }
+        if save_diff:
+            output_dirs['diff'] = output_path / split / 'diff'
 
-    for dir_path in output_dirs.values():
-        dir_path.mkdir(parents=True, exist_ok=True)
-        print(f"[INFO] Created directory: {dir_path}")
-
-    # Discover scenes
-    print("\n[INFO] Discovering scenes...")
-    scenes = discover_scenes(data_path)
-
-    if not scenes:
-        print("[ERROR] No complete scenes found!")
-        return
-
-    print(f"[INFO] Found {len(scenes)} complete scenes")
-
-    # Limit scenes in debug mode
-    if debug:
-        scene_ids = list(scenes.keys())[:debug_limit]
-        scenes = {sid: scenes[sid] for sid in scene_ids}
-        print(f"[DEBUG] Processing {len(scenes)} scenes only")
-
-    # Process scenes
-    total_tiles = 0
-
-    for scene_id, files in tqdm(scenes.items(), desc="Processing scenes"):
-        try:
-            tiles_saved = process_scene(scene_id, files, output_dirs, save_diff=save_diff)
-            total_tiles += tiles_saved
-        except Exception as e:
-            print(f"\n[ERROR] Failed to process {scene_id}: {e}")
-            continue
-
-    print(f"\n[INFO] Processing complete!")
-    print(f"[INFO] Total tiles saved: {total_tiles}")
-
-    # Print statistics
-    print_dataset_stats(output_dirs)
-
-    # Visualize samples
-    if visualize and total_tiles > 0:
         print("\n[INFO] Generating visualization...")
         visualize_samples(output_dirs, num_samples=3, show_diff=save_diff)
 
@@ -868,23 +1006,26 @@ def preprocess_dataset(input_path: Path = None,
 # ============================================================================
 
 if __name__ == "__main__":
-    # Run preprocessing
-    # Set debug=True for testing with limited samples
-    # Set debug=False for full dataset processing
-
-    preprocess_dataset(
-        input_path=Config.INPUT_PATH,
-        output_path=Config.OUTPUT_PATH,
-        split="train",
-        debug=True,              # Set to False for full processing
-        debug_limit=10,          # Number of scenes in debug mode
-        visualize=True,          # Show sample visualizations
-        save_diff=True           # [FIX #7] Save change/diff channel
+    # =========================================================
+    # OPTION 1: Process ALL tiers (tier1 + tier3) combined
+    # =========================================================
+    preprocess_all_tiers(
+        input_base_path=Path("/kaggle/input/xview2-challenge-dataset"),
+        output_path=Path("/kaggle/working/processed_data"),
+        tiers=["tier1", "tier3"],  # Process both tiers
+        debug=False,               # Set to True for testing
+        debug_limit=10,            # Scenes per tier in debug mode
+        save_diff=True,
+        visualize=True
     )
 
-    # To process full dataset, uncomment below:
+    # =========================================================
+    # OPTION 2: Process single tier only
+    # =========================================================
     # preprocess_dataset(
-    #     split="train",
+    #     input_path=Path("/kaggle/input/xview2-challenge-dataset"),
+    #     output_path=Path("/kaggle/working/processed_data"),
+    #     split="tier1",
     #     debug=False,
     #     visualize=True,
     #     save_diff=True
