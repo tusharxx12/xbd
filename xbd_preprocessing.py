@@ -27,6 +27,8 @@ CHANGELOG:
 - Improved visualization with overlay
 - Added multi-tier processing support
 - Added combined statistics across tiers
+- FIXED: JSON structure parsing for different xBD formats
+- ADDED: Debug mode with detailed logging
 """
 
 import json
@@ -42,7 +44,7 @@ from shapely.geometry import Polygon, MultiPolygon
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# [FIX #9] Performance improvement - disable OpenCV threading overhead
+# Performance improvement - disable OpenCV threading overhead
 cv2.setNumThreads(0)
 
 
@@ -86,7 +88,7 @@ class Config:
         4: "Destroyed"
     }
 
-    # [FIX #2] Damage priority for mask overwrite (higher value = higher priority)
+    # Damage priority for mask overwrite (higher value = higher priority)
     DAMAGE_PRIORITY = {
         0: 0,  # Background - lowest
         1: 1,  # No damage
@@ -100,6 +102,9 @@ class Config:
 
     # Optional change channel
     SAVE_DIFF_CHANNEL = True  # Set to True to save diff tiles
+
+    # Verbose logging for debugging
+    VERBOSE = False
 
 
 # ============================================================================
@@ -151,8 +156,8 @@ def extract_scene_id(filename: str) -> str:
 
 def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
     """
-    [FIX #1] Parse WKT polygon string to list of numpy coordinate arrays.
-    Now handles ALL polygons in MultiPolygon, not just the largest.
+    Parse WKT polygon string to list of numpy coordinate arrays.
+    Handles ALL polygons in MultiPolygon.
 
     Args:
         wkt_string: WKT format polygon string
@@ -190,7 +195,7 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
 
 def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
     """
-    [FIX #4 & #8] Clip polygon coordinates to image bounds.
+    Clip polygon coordinates to image bounds.
 
     Args:
         coords: Numpy array of coordinates (N, 2) in (x, y) format
@@ -207,17 +212,115 @@ def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
 
 
 # ============================================================================
+# JSON PARSING - FLEXIBLE FOR DIFFERENT xBD FORMATS
+# ============================================================================
+
+def extract_features_from_json(json_data: Dict) -> List[Dict]:
+    """
+    Extract features from JSON, handling different xBD formats.
+
+    The xBD dataset has different JSON structures:
+    - Format 1: json_data['features']['xy'] -> list of features
+    - Format 2: json_data['features']['lng_lat'] -> list of features
+    - Format 3: json_data directly contains features list
+
+    Args:
+        json_data: Parsed JSON dictionary
+
+    Returns:
+        List of feature dictionaries
+    """
+    features = []
+
+    # Try different JSON structures
+    if 'features' in json_data:
+        feat_container = json_data['features']
+
+        # Check if features is a dict with 'xy' or 'lng_lat' keys
+        if isinstance(feat_container, dict):
+            if 'xy' in feat_container:
+                features = feat_container['xy']
+            elif 'lng_lat' in feat_container:
+                features = feat_container['lng_lat']
+            else:
+                # Maybe features dict has other structure
+                for key, val in feat_container.items():
+                    if isinstance(val, list):
+                        features = val
+                        break
+        elif isinstance(feat_container, list):
+            features = feat_container
+
+    # GeoJSON format - features at top level
+    if not features and isinstance(json_data, dict):
+        if json_data.get('type') == 'FeatureCollection':
+            features = json_data.get('features', [])
+
+    return features if isinstance(features, list) else []
+
+
+def extract_polygon_and_damage(feature: Dict) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract polygon WKT and damage type from a feature.
+    Handles different property structures in xBD.
+
+    Args:
+        feature: Feature dictionary
+
+    Returns:
+        Tuple of (wkt_string, damage_type) or (None, None) if not found
+    """
+    wkt_string = None
+    damage_type = None
+
+    # Get properties
+    properties = feature.get('properties', {})
+    if not properties:
+        properties = feature  # Sometimes properties are at top level
+
+    # Try to get WKT polygon
+    # Common keys: 'feature_wkt', 'wkt', 'geometry'
+    for wkt_key in ['feature_wkt', 'wkt', 'pixelWkt']:
+        if wkt_key in properties:
+            wkt_string = properties[wkt_key]
+            break
+
+    # If no WKT, try geometry field
+    if not wkt_string and 'geometry' in feature:
+        geom = feature['geometry']
+        if isinstance(geom, dict) and 'coordinates' in geom:
+            # Convert GeoJSON geometry to WKT
+            try:
+                from shapely.geometry import shape
+                shapely_geom = shape(geom)
+                wkt_string = shapely_geom.wkt
+            except:
+                pass
+
+    # Try to get damage type
+    # Common keys: 'subtype', 'damage', 'damage_type', '_damage'
+    for damage_key in ['subtype', 'damage', 'damage_type', '_damage']:
+        if damage_key in properties:
+            damage_type = properties[damage_key]
+            break
+
+    return wkt_string, damage_type
+
+
+# ============================================================================
 # MASK GENERATION
 # ============================================================================
 
-def create_mask(json_data: Dict, height: int, width: int) -> np.ndarray:
+def create_mask(json_data: Dict, height: int, width: int, verbose: bool = False) -> np.ndarray:
     """
     Create segmentation mask from JSON label data.
+    Handles multiple JSON formats used in xBD dataset.
 
     Args:
         json_data: Parsed JSON dictionary with building annotations
         height: Output mask height
         width: Output mask width
+        verbose: Print debug information
 
     Returns:
         Numpy array mask of shape (height, width)
@@ -225,41 +328,60 @@ def create_mask(json_data: Dict, height: int, width: int) -> np.ndarray:
     """
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    features = json_data.get('features', {}).get('xy', [])
+    # Extract features using flexible parser
+    features = extract_features_from_json(json_data)
 
     if not features:
+        if verbose:
+            print(f"    [DEBUG] No features found in JSON")
         return mask
 
+    if verbose:
+        print(f"    [DEBUG] Found {len(features)} features")
+
     polygon_data = []
+    skipped_no_wkt = 0
+    skipped_no_damage = 0
+    skipped_invalid = 0
 
     for feature in features:
-        properties = feature.get('properties', {})
+        # Extract polygon and damage using flexible parser
+        wkt_string, damage_type = extract_polygon_and_damage(feature)
 
-        if 'subtype' not in properties:
+        # Skip if no WKT
+        if not wkt_string or not wkt_string.strip():
+            skipped_no_wkt += 1
             continue
 
-        damage_type = properties.get('subtype', '')
-
+        # Skip if no damage type or unrecognized
         if not damage_type or damage_type not in Config.DAMAGE_CLASSES:
+            skipped_no_damage += 1
             continue
 
         damage_class = Config.DAMAGE_CLASSES.get(damage_type, 0)
 
+        # Skip background/unclassified
         if damage_class == 0:
+            skipped_invalid += 1
             continue
 
-        wkt_string = properties.get('feature_wkt', '')
-        if not wkt_string or not wkt_string.strip():
-            continue
-
+        # Parse polygons from WKT
         polygons = parse_polygons_from_wkt(wkt_string)
 
         for coords in polygons:
             if coords is not None and len(coords) >= 3:
                 polygon_data.append((coords, damage_class))
 
+    if verbose:
+        print(f"    [DEBUG] Valid polygons: {len(polygon_data)}, "
+              f"Skipped (no wkt): {skipped_no_wkt}, "
+              f"Skipped (no damage): {skipped_no_damage}, "
+              f"Skipped (invalid): {skipped_invalid}")
+
+    # Sort by damage class so higher classes overwrite lower
     polygon_data.sort(key=lambda x: Config.DAMAGE_PRIORITY[x[1]])
 
+    # Draw polygons
     for coords, damage_class in polygon_data:
         coords = clip_coordinates(coords, height, width)
         polygon = coords.reshape((-1, 1, 2))
@@ -282,12 +404,11 @@ def create_building_mask(json_data: Dict, height: int, width: int) -> np.ndarray
     """
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    features = json_data.get('features', {}).get('xy', [])
+    features = extract_features_from_json(json_data)
 
     for feature in features:
-        properties = feature.get('properties', {})
+        wkt_string, _ = extract_polygon_and_damage(feature)
 
-        wkt_string = properties.get('feature_wkt', '')
         if not wkt_string or not wkt_string.strip():
             continue
 
@@ -418,6 +539,57 @@ def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
 
 
 # ============================================================================
+# DEBUG: ANALYZE SINGLE JSON
+# ============================================================================
+
+def debug_analyze_json(json_path: Path):
+    """
+    Analyze a single JSON file to understand its structure.
+    Useful for debugging parsing issues.
+
+    Args:
+        json_path: Path to JSON file
+    """
+    print(f"\n[DEBUG] Analyzing JSON: {json_path}")
+
+    json_data = load_json(json_path)
+    if json_data is None:
+        print("  Failed to load JSON")
+        return
+
+    print(f"  Top-level keys: {list(json_data.keys())}")
+
+    if 'features' in json_data:
+        feat = json_data['features']
+        print(f"  'features' type: {type(feat)}")
+
+        if isinstance(feat, dict):
+            print(f"  'features' keys: {list(feat.keys())}")
+            for key in feat.keys():
+                val = feat[key]
+                if isinstance(val, list):
+                    print(f"    '{key}': list with {len(val)} items")
+                    if val:
+                        print(f"      First item keys: {list(val[0].keys()) if isinstance(val[0], dict) else 'not a dict'}")
+                        if isinstance(val[0], dict) and 'properties' in val[0]:
+                            print(f"      Properties keys: {list(val[0]['properties'].keys())}")
+        elif isinstance(feat, list):
+            print(f"  'features' is a list with {len(feat)} items")
+            if feat:
+                print(f"    First item keys: {list(feat[0].keys()) if isinstance(feat[0], dict) else 'not a dict'}")
+
+    # Try extracting features
+    features = extract_features_from_json(json_data)
+    print(f"  Extracted {len(features)} features")
+
+    if features:
+        # Check first feature
+        first = features[0]
+        wkt_str, damage = extract_polygon_and_damage(first)
+        print(f"  First feature - WKT: {'Yes' if wkt_str else 'No'}, Damage: {damage}")
+
+
+# ============================================================================
 # SCENE PROCESSING
 # ============================================================================
 
@@ -425,7 +597,8 @@ def process_scene(scene_id: str,
                   files: Dict[str, Path],
                   output_dirs: Dict[str, Path],
                   save_diff: bool = False,
-                  tier_prefix: str = "") -> int:
+                  tier_prefix: str = "",
+                  verbose: bool = False) -> Tuple[int, int]:
     """
     Process a single scene: load, create mask, tile, and save.
 
@@ -435,18 +608,21 @@ def process_scene(scene_id: str,
         output_dirs: Dictionary with output paths
         save_diff: Whether to save diff channel
         tier_prefix: Prefix to add to filenames (e.g., "tier1_")
+        verbose: Print debug information
 
     Returns:
-        Number of tiles saved
+        Tuple of (tiles_saved, tiles_skipped)
     """
     tiles_saved = 0
+    tiles_skipped = 0
 
     pre_img = cv2.imread(str(files['pre']))
     post_img = cv2.imread(str(files['post']))
 
     if pre_img is None or post_img is None:
-        print(f"[WARNING] Failed to load images for {scene_id}")
-        return 0
+        if verbose:
+            print(f"[WARNING] Failed to load images for {scene_id}")
+        return 0, 0
 
     height, width = pre_img.shape[:2]
 
@@ -460,9 +636,14 @@ def process_scene(scene_id: str,
     json_data = load_json(files['json'])
 
     if json_data is None:
-        return 0
+        return 0, 0
 
-    mask = create_mask(json_data, height, width)
+    mask = create_mask(json_data, height, width, verbose=verbose)
+
+    # Check if mask has any buildings
+    total_building_pixels = np.sum(mask > 0)
+    if verbose and total_building_pixels == 0:
+        print(f"  [DEBUG] {scene_id}: Empty mask (no buildings)")
 
     pre_tiles = tile_image(pre_img, Config.TILE_SIZE, Config.TILE_STRIDE)
     post_tiles = tile_image(post_img, Config.TILE_SIZE, Config.TILE_STRIDE)
@@ -482,6 +663,7 @@ def process_scene(scene_id: str,
         building_ratio = compute_building_ratio(mask_tile)
 
         if building_ratio < Config.MIN_BUILDING_RATIO:
+            tiles_skipped += 1
             continue
 
         # Add tier prefix to filename for unique identification
@@ -509,7 +691,7 @@ def process_scene(scene_id: str,
 
         tiles_saved += 1
 
-    return tiles_saved
+    return tiles_saved, tiles_skipped
 
 
 # ============================================================================
@@ -729,7 +911,7 @@ def print_class_weights(stats: Dict):
 
     class_counts = stats['class_counts']
 
-    # Remove background for weight calculation (or keep if needed)
+    # Remove background for weight calculation
     building_classes = {k: v for k, v in class_counts.items() if k > 0}
 
     if not building_classes:
@@ -775,7 +957,8 @@ def preprocess_single_tier(input_path: Path,
                            tier_name: str,
                            debug: bool = False,
                            debug_limit: int = None,
-                           save_diff: bool = True) -> Dict:
+                           save_diff: bool = True,
+                           verbose: bool = False) -> Dict:
     """
     Process a single tier of the dataset.
 
@@ -786,6 +969,7 @@ def preprocess_single_tier(input_path: Path,
         debug: Enable debug mode
         debug_limit: Number of scenes in debug mode
         save_diff: Save diff channel
+        verbose: Print detailed debug info
 
     Returns:
         Statistics dictionary for this tier
@@ -823,6 +1007,11 @@ def preprocess_single_tier(input_path: Path,
 
     print(f"[INFO] Found {len(scenes)} complete scenes")
 
+    # Debug: Analyze first JSON to check structure
+    if verbose or debug:
+        first_scene = list(scenes.values())[0]
+        debug_analyze_json(first_scene['json'])
+
     if debug:
         scene_ids = list(scenes.keys())[:debug_limit]
         scenes = {sid: scenes[sid] for sid in scene_ids}
@@ -830,27 +1019,41 @@ def preprocess_single_tier(input_path: Path,
 
     # Process scenes with tier prefix
     total_tiles = 0
+    total_skipped = 0
+    empty_mask_count = 0
     tier_prefix = f"{tier_name}_"
 
     for scene_id, files in tqdm(scenes.items(), desc=f"Processing {tier_name}"):
         try:
-            tiles_saved = process_scene(
+            tiles_saved, tiles_skipped = process_scene(
                 scene_id, files, output_dirs,
                 save_diff=save_diff,
-                tier_prefix=tier_prefix
+                tier_prefix=tier_prefix,
+                verbose=verbose
             )
             total_tiles += tiles_saved
+            total_skipped += tiles_skipped
+
+            if tiles_saved == 0 and tiles_skipped == 0:
+                empty_mask_count += 1
+
         except Exception as e:
             print(f"\n[ERROR] Failed to process {scene_id}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     print(f"\n[INFO] {tier_name} processing complete!")
     print(f"[INFO] Tiles saved: {total_tiles}")
+    print(f"[INFO] Tiles skipped (low building ratio): {total_skipped}")
+    print(f"[INFO] Scenes with empty masks: {empty_mask_count}")
 
     # Compute statistics
     stats = compute_dataset_stats(output_dirs)
     stats['tier'] = tier_name
     stats['scenes_processed'] = len(scenes)
+    stats['tiles_skipped'] = total_skipped
+    stats['empty_mask_scenes'] = empty_mask_count
 
     return stats
 
@@ -865,7 +1068,8 @@ def preprocess_all_tiers(input_base_path: Path = None,
                          debug: bool = False,
                          debug_limit: int = None,
                          save_diff: bool = True,
-                         visualize: bool = True):
+                         visualize: bool = True,
+                         verbose: bool = False):
     """
     Process all tiers and output combined statistics.
 
@@ -877,6 +1081,7 @@ def preprocess_all_tiers(input_base_path: Path = None,
         debug_limit: Number of scenes per tier in debug mode
         save_diff: Save diff channel
         visualize: Show sample visualizations
+        verbose: Print detailed debug info
     """
     input_base_path = input_base_path or Config.INPUT_BASE_PATH
     output_path = output_path or Config.OUTPUT_PATH
@@ -908,7 +1113,8 @@ def preprocess_all_tiers(input_base_path: Path = None,
             tier_name=tier,
             debug=debug,
             debug_limit=debug_limit,
-            save_diff=save_diff
+            save_diff=save_diff,
+            verbose=verbose
         )
 
         if stats:
@@ -1013,20 +1219,22 @@ if __name__ == "__main__":
         input_base_path=Path("/kaggle/input/xview2-challenge-dataset"),
         output_path=Path("/kaggle/working/processed_data"),
         tiers=["tier1", "tier3"],  # Process both tiers
-        debug=False,               # Set to True for testing
-        debug_limit=10,            # Scenes per tier in debug mode
+        debug=True,                # Set to True for testing first!
+        debug_limit=5,             # Test with 5 scenes first
         save_diff=True,
-        visualize=True
+        visualize=True,
+        verbose=True               # Enable detailed logging
     )
 
     # =========================================================
-    # OPTION 2: Process single tier only
+    # OPTION 2: Full processing (after debug passes)
     # =========================================================
-    # preprocess_dataset(
-    #     input_path=Path("/kaggle/input/xview2-challenge-dataset"),
+    # preprocess_all_tiers(
+    #     input_base_path=Path("/kaggle/input/xview2-challenge-dataset"),
     #     output_path=Path("/kaggle/working/processed_data"),
-    #     split="tier1",
+    #     tiers=["tier1", "tier3"],
     #     debug=False,
+    #     save_diff=True,
     #     visualize=True,
-    #     save_diff=True
+    #     verbose=False
     # )
