@@ -52,11 +52,13 @@ cv2.setNumThreads(0)
 # CONFIGURATION
 # ============================================================================
 
+
 class Config:
     """Central configuration for preprocessing parameters."""
 
     # Paths (Kaggle environment) - Updated for multi-tier support
-    INPUT_BASE_PATH = Path("/kaggle/input/xview2-challenge-dataset")
+    # FIX 1: Correct default input path to xBD dataset location
+    INPUT_BASE_PATH = Path("/kaggle/input/datasets/qianlanzz/xbd-dataset/xbd")
     OUTPUT_PATH = Path("/kaggle/working/processed_data")
 
     # Available tiers
@@ -68,7 +70,8 @@ class Config:
     TILE_STRIDE = 512  # No overlap
 
     # Filtering
-    MIN_BUILDING_RATIO = 0.01  # Skip tiles with < 1% building pixels
+    # FIX 6: Lower min building ratio for better balance between recall and noise
+    MIN_BUILDING_RATIO = 0.005  # Skip tiles with < 0.5% building pixels
 
     # Damage class mapping
     DAMAGE_CLASSES = {
@@ -85,7 +88,7 @@ class Config:
         1: "No Damage",
         2: "Minor",
         3: "Major",
-        4: "Destroyed"
+        4: "Destroyed",
     }
 
     # Damage priority for mask overwrite (higher value = higher priority)
@@ -111,6 +114,7 @@ class Config:
 # UTILITY FUNCTIONS
 # ============================================================================
 
+
 def load_json(json_path: Path) -> Optional[Dict]:
     """
     Load and parse JSON label file.
@@ -122,7 +126,7 @@ def load_json(json_path: Path) -> Optional[Dict]:
         Parsed JSON dict or None if error
     """
     try:
-        with open(json_path, 'r') as f:
+        with open(json_path, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"[WARNING] Failed to load {json_path}: {e}")
@@ -143,15 +147,15 @@ def extract_scene_id(filename: str) -> str:
         Scene ID string
     """
     name = Path(filename).stem
-    parts = name.split('_')
+    parts = name.split("_")
 
     scene_parts = []
     for part in parts:
-        if part in ('pre', 'post'):
+        if part in ("pre", "post"):
             break
         scene_parts.append(part)
 
-    return '_'.join(scene_parts)
+    return "_".join(scene_parts)
 
 
 def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
@@ -173,17 +177,17 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
         if geom.is_empty:
             return polygons
 
-        if geom.geom_type == 'Polygon':
+        if geom.geom_type == "Polygon":
             coords = np.array(geom.exterior.coords)
             polygons.append(coords)
-        elif geom.geom_type == 'MultiPolygon':
+        elif geom.geom_type == "MultiPolygon":
             for poly in geom.geoms:
                 if not poly.is_empty:
                     coords = np.array(poly.exterior.coords)
                     polygons.append(coords)
-        elif geom.geom_type == 'GeometryCollection':
+        elif geom.geom_type == "GeometryCollection":
             for g in geom.geoms:
-                if g.geom_type == 'Polygon' and not g.is_empty:
+                if g.geom_type == "Polygon" and not g.is_empty:
                     coords = np.array(g.exterior.coords)
                     polygons.append(coords)
 
@@ -215,6 +219,7 @@ def clip_coordinates(coords: np.ndarray, height: int, width: int) -> np.ndarray:
 # JSON PARSING - FLEXIBLE FOR DIFFERENT xBD FORMATS
 # ============================================================================
 
+
 def extract_features_from_json(json_data: Dict) -> List[Dict]:
     """
     Extract features from JSON, handling different xBD formats.
@@ -233,15 +238,15 @@ def extract_features_from_json(json_data: Dict) -> List[Dict]:
     features = []
 
     # Try different JSON structures
-    if 'features' in json_data:
-        feat_container = json_data['features']
+    if "features" in json_data:
+        feat_container = json_data["features"]
 
         # Check if features is a dict with 'xy' or 'lng_lat' keys
         if isinstance(feat_container, dict):
-            if 'xy' in feat_container:
-                features = feat_container['xy']
-            elif 'lng_lat' in feat_container:
-                features = feat_container['lng_lat']
+            if "xy" in feat_container:
+                features = feat_container["xy"]
+            elif "lng_lat" in feat_container:
+                features = feat_container["lng_lat"]
             else:
                 # Maybe features dict has other structure
                 for key, val in feat_container.items():
@@ -253,8 +258,8 @@ def extract_features_from_json(json_data: Dict) -> List[Dict]:
 
     # GeoJSON format - features at top level
     if not features and isinstance(json_data, dict):
-        if json_data.get('type') == 'FeatureCollection':
-            features = json_data.get('features', [])
+        if json_data.get("type") == "FeatureCollection":
+            features = json_data.get("features", [])
 
     return features if isinstance(features, list) else []
 
@@ -273,25 +278,27 @@ def extract_polygon_and_damage(feature: Dict) -> Tuple[Optional[str], Optional[s
     wkt_string = None
     damage_type = None
 
-    # Get properties
-    properties = feature.get('properties', {})
-    if not properties:
-        properties = feature  # Sometimes properties are at top level
+    # FIX 3: Only use feature properties, no fallback to entire feature
+    properties = feature.get("properties", {})
 
-    # Try to get WKT polygon
-    # Common keys: 'feature_wkt', 'wkt', 'geometry'
-    for wkt_key in ['feature_wkt', 'wkt', 'pixelWkt']:
+    # FIX 2: Try to get WKT polygon - prioritize in order: ['wkt', 'feature_wkt', 'pixelWkt']
+    # Skip empty or null values
+    for wkt_key in ["wkt", "feature_wkt", "pixelWkt"]:
         if wkt_key in properties:
-            wkt_string = properties[wkt_key]
-            break
+            val = properties[wkt_key]
+            # Skip empty, null, or non-string values
+            if val and isinstance(val, str) and val.strip():
+                wkt_string = val
+                break
 
     # If no WKT, try geometry field
-    if not wkt_string and 'geometry' in feature:
-        geom = feature['geometry']
-        if isinstance(geom, dict) and 'coordinates' in geom:
+    if not wkt_string and "geometry" in feature:
+        geom = feature["geometry"]
+        if isinstance(geom, dict) and "coordinates" in geom:
             # Convert GeoJSON geometry to WKT
             try:
                 from shapely.geometry import shape
+
                 shapely_geom = shape(geom)
                 wkt_string = shapely_geom.wkt
             except:
@@ -299,7 +306,7 @@ def extract_polygon_and_damage(feature: Dict) -> Tuple[Optional[str], Optional[s
 
     # Try to get damage type
     # Common keys: 'subtype', 'damage', 'damage_type', '_damage'
-    for damage_key in ['subtype', 'damage', 'damage_type', '_damage']:
+    for damage_key in ["subtype", "damage", "damage_type", "_damage"]:
         if damage_key in properties:
             damage_type = properties[damage_key]
             break
@@ -311,7 +318,10 @@ def extract_polygon_and_damage(feature: Dict) -> Tuple[Optional[str], Optional[s
 # MASK GENERATION
 # ============================================================================
 
-def create_mask(json_data: Dict, height: int, width: int, verbose: bool = False) -> np.ndarray:
+
+def create_mask(
+    json_data: Dict, height: int, width: int, verbose: bool = False
+) -> np.ndarray:
     """
     Create segmentation mask from JSON label data.
     Handles multiple JSON formats used in xBD dataset.
@@ -373,19 +383,23 @@ def create_mask(json_data: Dict, height: int, width: int, verbose: bool = False)
                 polygon_data.append((coords, damage_class))
 
     if verbose:
-        print(f"    [DEBUG] Valid polygons: {len(polygon_data)}, "
-              f"Skipped (no wkt): {skipped_no_wkt}, "
-              f"Skipped (no damage): {skipped_no_damage}, "
-              f"Skipped (invalid): {skipped_invalid}")
+        print(
+            f"    [DEBUG] Valid polygons: {len(polygon_data)}, "
+            f"Skipped (no wkt): {skipped_no_wkt}, "
+            f"Skipped (no damage): {skipped_no_damage}, "
+            f"Skipped (invalid): {skipped_invalid}"
+        )
 
-    # Sort by damage class so higher classes overwrite lower
-    polygon_data.sort(key=lambda x: Config.DAMAGE_PRIORITY[x[1]])
-
-    # Draw polygons
+    # FIX 4: Use np.maximum to ensure higher damage classes always overwrite lower ones
+    # Replace draw-order dependency with deterministic np.maximum approach
     for coords, damage_class in polygon_data:
         coords = clip_coordinates(coords, height, width)
         polygon = coords.reshape((-1, 1, 2))
-        cv2.fillPoly(mask, [polygon], color=int(damage_class))
+        # Create temporary mask for this polygon
+        temp_mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillPoly(temp_mask, [polygon], color=int(damage_class))
+        # Use np.maximum to ensure higher damage class wins
+        mask = np.maximum(mask, temp_mask)
 
     return mask
 
@@ -427,9 +441,10 @@ def create_building_mask(json_data: Dict, height: int, width: int) -> np.ndarray
 # TILING
 # ============================================================================
 
-def tile_image(image: np.ndarray,
-               tile_size: int = 512,
-               stride: int = 512) -> Dict[Tuple[int, int], np.ndarray]:
+
+def tile_image(
+    image: np.ndarray, tile_size: int = 512, stride: int = 512
+) -> Dict[Tuple[int, int], np.ndarray]:
     """
     Split image into tiles with index-based dictionary for safe matching.
 
@@ -447,9 +462,9 @@ def tile_image(image: np.ndarray,
     for row_idx, y in enumerate(range(0, h - tile_size + 1, stride)):
         for col_idx, x in enumerate(range(0, w - tile_size + 1, stride)):
             if len(image.shape) == 3:
-                tile = image[y:y+tile_size, x:x+tile_size, :]
+                tile = image[y : y + tile_size, x : x + tile_size, :]
             else:
-                tile = image[y:y+tile_size, x:x+tile_size]
+                tile = image[y : y + tile_size, x : x + tile_size]
 
             tiles[(row_idx, col_idx)] = tile
 
@@ -475,6 +490,7 @@ def compute_building_ratio(mask_tile: np.ndarray) -> float:
 # CHANGE DETECTION
 # ============================================================================
 
+
 def compute_change_image(pre_img: np.ndarray, post_img: np.ndarray) -> np.ndarray:
     """
     Compute absolute difference between pre and post images.
@@ -492,6 +508,7 @@ def compute_change_image(pre_img: np.ndarray, post_img: np.ndarray) -> np.ndarra
 # ============================================================================
 # FILE DISCOVERY AND PAIRING
 # ============================================================================
+
 
 def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
     """
@@ -514,21 +531,21 @@ def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
 
     for img_path in images_dir.glob("*_pre_disaster.png"):
         scene_id = extract_scene_id(img_path.name)
-        scenes[scene_id]['pre'] = img_path
+        scenes[scene_id]["pre"] = img_path
 
     for img_path in images_dir.glob("*_post_disaster.png"):
         scene_id = extract_scene_id(img_path.name)
-        scenes[scene_id]['post'] = img_path
+        scenes[scene_id]["post"] = img_path
 
     if labels_dir.exists():
         for json_path in labels_dir.glob("*_post_disaster.json"):
             scene_id = extract_scene_id(json_path.name)
-            scenes[scene_id]['json'] = json_path
+            scenes[scene_id]["json"] = json_path
 
     complete_scenes = {
         scene_id: files
         for scene_id, files in scenes.items()
-        if all(k in files for k in ['pre', 'post', 'json'])
+        if all(k in files for k in ["pre", "post", "json"])
     }
 
     incomplete = len(scenes) - len(complete_scenes)
@@ -541,6 +558,7 @@ def discover_scenes(data_path: Path) -> Dict[str, Dict[str, Path]]:
 # ============================================================================
 # DEBUG: ANALYZE SINGLE JSON
 # ============================================================================
+
 
 def debug_analyze_json(json_path: Path):
     """
@@ -559,8 +577,8 @@ def debug_analyze_json(json_path: Path):
 
     print(f"  Top-level keys: {list(json_data.keys())}")
 
-    if 'features' in json_data:
-        feat = json_data['features']
+    if "features" in json_data:
+        feat = json_data["features"]
         print(f"  'features' type: {type(feat)}")
 
         if isinstance(feat, dict):
@@ -571,28 +589,36 @@ def debug_analyze_json(json_path: Path):
                     print(f"    '{key}': list with {len(val)} items")
                     if val:
                         first_item = val[0]
-                        print(f"      First item keys: {list(first_item.keys()) if isinstance(first_item, dict) else 'not a dict'}")
+                        print(
+                            f"      First item keys: {list(first_item.keys()) if isinstance(first_item, dict) else 'not a dict'}"
+                        )
                         if isinstance(first_item, dict):
                             # Show ALL keys at top level of feature
                             print(f"      === FULL FIRST FEATURE STRUCTURE ===")
                             for k, v in first_item.items():
                                 if isinstance(v, dict):
-                                    print(f"        '{k}': dict with keys {list(v.keys())}")
+                                    print(
+                                        f"        '{k}': dict with keys {list(v.keys())}"
+                                    )
                                 elif isinstance(v, str) and len(v) > 100:
                                     print(f"        '{k}': '{v[:100]}...' (truncated)")
                                 else:
                                     print(f"        '{k}': {v}")
-                            if 'properties' in first_item:
+                            if "properties" in first_item:
                                 print(f"      === PROPERTIES ===")
-                                for pk, pv in first_item['properties'].items():
+                                for pk, pv in first_item["properties"].items():
                                     if isinstance(pv, str) and len(pv) > 100:
-                                        print(f"        '{pk}': '{pv[:100]}...' (truncated)")
+                                        print(
+                                            f"        '{pk}': '{pv[:100]}...' (truncated)"
+                                        )
                                     else:
                                         print(f"        '{pk}': {pv}")
         elif isinstance(feat, list):
             print(f"  'features' is a list with {len(feat)} items")
             if feat:
-                print(f"    First item keys: {list(feat[0].keys()) if isinstance(feat[0], dict) else 'not a dict'}")
+                print(
+                    f"    First item keys: {list(feat[0].keys()) if isinstance(feat[0], dict) else 'not a dict'}"
+                )
 
     # Try extracting features
     features = extract_features_from_json(json_data)
@@ -614,12 +640,15 @@ def debug_analyze_json(json_path: Path):
 # SCENE PROCESSING
 # ============================================================================
 
-def process_scene(scene_id: str,
-                  files: Dict[str, Path],
-                  output_dirs: Dict[str, Path],
-                  save_diff: bool = False,
-                  tier_prefix: str = "",
-                  verbose: bool = False) -> Tuple[int, int]:
+
+def process_scene(
+    scene_id: str,
+    files: Dict[str, Path],
+    output_dirs: Dict[str, Path],
+    save_diff: bool = False,
+    tier_prefix: str = "",
+    verbose: bool = False,
+) -> Tuple[int, int]:
     """
     Process a single scene: load, create mask, tile, and save.
 
@@ -637,8 +666,8 @@ def process_scene(scene_id: str,
     tiles_saved = 0
     tiles_skipped = 0
 
-    pre_img = cv2.imread(str(files['pre']))
-    post_img = cv2.imread(str(files['post']))
+    pre_img = cv2.imread(str(files["pre"]))
+    post_img = cv2.imread(str(files["post"]))
 
     if pre_img is None or post_img is None:
         if verbose:
@@ -654,7 +683,7 @@ def process_scene(scene_id: str,
     if save_diff:
         diff_img = compute_change_image(pre_img, post_img)
 
-    json_data = load_json(files['json'])
+    json_data = load_json(files["json"])
 
     if json_data is None:
         return 0, 0
@@ -691,23 +720,20 @@ def process_scene(scene_id: str,
         tile_name = f"{tier_prefix}{scene_id}_tile_{row}_{col}.png"
 
         cv2.imwrite(
-            str(output_dirs['pre'] / tile_name),
-            cv2.cvtColor(pre_tile, cv2.COLOR_RGB2BGR)
+            str(output_dirs["pre"] / tile_name),
+            cv2.cvtColor(pre_tile, cv2.COLOR_RGB2BGR),
         )
         cv2.imwrite(
-            str(output_dirs['post'] / tile_name),
-            cv2.cvtColor(post_tile, cv2.COLOR_RGB2BGR)
+            str(output_dirs["post"] / tile_name),
+            cv2.cvtColor(post_tile, cv2.COLOR_RGB2BGR),
         )
-        cv2.imwrite(
-            str(output_dirs['masks'] / tile_name),
-            mask_tile
-        )
+        cv2.imwrite(str(output_dirs["masks"] / tile_name), mask_tile)
 
         if save_diff and diff_tiles is not None and (row, col) in diff_tiles:
             diff_tile = diff_tiles[(row, col)]
             cv2.imwrite(
-                str(output_dirs['diff'] / tile_name),
-                cv2.cvtColor(diff_tile, cv2.COLOR_RGB2BGR)
+                str(output_dirs["diff"] / tile_name),
+                cv2.cvtColor(diff_tile, cv2.COLOR_RGB2BGR),
             )
 
         tiles_saved += 1
@@ -719,6 +745,7 @@ def process_scene(scene_id: str,
 # STATISTICS
 # ============================================================================
 
+
 def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
     """
     Compute statistics about the processed dataset.
@@ -729,7 +756,7 @@ def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
     Returns:
         Dictionary with statistics
     """
-    tile_files = list(output_dirs['masks'].glob("*.png"))
+    tile_files = list(output_dirs["masks"].glob("*.png"))
 
     if not tile_files:
         return {}
@@ -746,9 +773,9 @@ def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
             total_pixels += cnt
 
     return {
-        'total_tiles': len(tile_files),
-        'total_pixels': total_pixels,
-        'class_counts': dict(class_counts)
+        "total_tiles": len(tile_files),
+        "total_pixels": total_pixels,
+        "class_counts": dict(class_counts),
     }
 
 
@@ -760,23 +787,23 @@ def print_dataset_stats(stats: Dict, title: str = "DATASET STATISTICS"):
         stats: Dictionary with statistics
         title: Title for the statistics section
     """
-    if not stats or 'total_tiles' not in stats:
+    if not stats or "total_tiles" not in stats:
         print(f"\n[WARNING] No statistics available for {title}")
         return
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(title)
-    print("="*60)
+    print("=" * 60)
     print(f"Total tiles: {stats['total_tiles']:,}")
     print(f"\nDamage class distribution:")
 
-    total_pixels = stats['total_pixels']
-    class_counts = stats['class_counts']
+    total_pixels = stats["total_pixels"]
+    class_counts = stats["class_counts"]
 
     for cls in sorted(class_counts.keys()):
         count = class_counts[cls]
         percentage = (count / total_pixels) * 100
-        class_name = Config.CLASS_NAMES.get(cls, f'Class {cls}')
+        class_name = Config.CLASS_NAMES.get(cls, f"Class {cls}")
         print(f"  {class_name}: {count:,} pixels ({percentage:.2f}%)")
 
 
@@ -790,20 +817,16 @@ def merge_stats(stats_list: List[Dict]) -> Dict:
     Returns:
         Merged statistics dictionary
     """
-    merged = {
-        'total_tiles': 0,
-        'total_pixels': 0,
-        'class_counts': defaultdict(int)
-    }
+    merged = {"total_tiles": 0, "total_pixels": 0, "class_counts": defaultdict(int)}
 
     for stats in stats_list:
         if stats:
-            merged['total_tiles'] += stats['total_tiles']
-            merged['total_pixels'] += stats['total_pixels']
-            for cls, count in stats['class_counts'].items():
-                merged['class_counts'][cls] += count
+            merged["total_tiles"] += stats["total_tiles"]
+            merged["total_pixels"] += stats["total_pixels"]
+            for cls, count in stats["class_counts"].items():
+                merged["class_counts"][cls] += count
 
-    merged['class_counts'] = dict(merged['class_counts'])
+    merged["class_counts"] = dict(merged["class_counts"])
     return merged
 
 
@@ -811,7 +834,10 @@ def merge_stats(stats_list: List[Dict]) -> Dict:
 # VISUALIZATION
 # ============================================================================
 
-def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_diff: bool = False):
+
+def visualize_samples(
+    output_dirs: Dict[str, Path], num_samples: int = 3, show_diff: bool = False
+):
     """
     Display random samples for visual verification.
 
@@ -820,7 +846,7 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
         num_samples: Number of samples to display
         show_diff: Whether to show diff channel
     """
-    tile_files = list(output_dirs['pre'].glob("*.png"))
+    tile_files = list(output_dirs["pre"].glob("*.png"))
 
     if not tile_files:
         print("[WARNING] No processed tiles found for visualization")
@@ -836,10 +862,12 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
         4: [255, 0, 0],
     }
 
-    has_diff = show_diff and 'diff' in output_dirs and output_dirs['diff'].exists()
+    has_diff = show_diff and "diff" in output_dirs and output_dirs["diff"].exists()
     num_cols = 5 if has_diff else 4
 
-    fig, axes = plt.subplots(num_samples, num_cols, figsize=(4 * num_cols, 5 * num_samples))
+    fig, axes = plt.subplots(
+        num_samples, num_cols, figsize=(4 * num_cols, 5 * num_samples)
+    )
 
     if num_samples == 1:
         axes = axes.reshape(1, -1)
@@ -847,13 +875,13 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
     for idx, pre_path in enumerate(samples):
         tile_name = pre_path.name
 
-        pre_img = cv2.imread(str(output_dirs['pre'] / tile_name))
+        pre_img = cv2.imread(str(output_dirs["pre"] / tile_name))
         pre_img = cv2.cvtColor(pre_img, cv2.COLOR_BGR2RGB)
 
-        post_img = cv2.imread(str(output_dirs['post'] / tile_name))
+        post_img = cv2.imread(str(output_dirs["post"] / tile_name))
         post_img = cv2.cvtColor(post_img, cv2.COLOR_BGR2RGB)
 
-        mask = cv2.imread(str(output_dirs['masks'] / tile_name), cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(str(output_dirs["masks"] / tile_name), cv2.IMREAD_GRAYSCALE)
 
         colored_mask = np.zeros((*mask.shape, 3), dtype=np.uint8)
         for class_id, color in damage_colors.items():
@@ -865,40 +893,40 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
         for class_id, color in damage_colors.items():
             if class_id == 0:
                 continue
-            mask_region = (mask == class_id)
+            mask_region = mask == class_id
             overlay[mask_region] = (
                 (1 - alpha) * overlay[mask_region] + alpha * np.array(color)
             ).astype(np.uint8)
 
         axes[idx, 0].imshow(pre_img)
         axes[idx, 0].set_title(f"Pre-Disaster\n{tile_name[:30]}...")
-        axes[idx, 0].axis('off')
+        axes[idx, 0].axis("off")
 
         axes[idx, 1].imshow(post_img)
         axes[idx, 1].set_title("Post-Disaster")
-        axes[idx, 1].axis('off')
+        axes[idx, 1].axis("off")
 
         axes[idx, 2].imshow(colored_mask)
         axes[idx, 2].set_title("Damage Mask")
-        axes[idx, 2].axis('off')
+        axes[idx, 2].axis("off")
 
         axes[idx, 3].imshow(overlay)
         axes[idx, 3].set_title("Overlay (Post + Mask)")
-        axes[idx, 3].axis('off')
+        axes[idx, 3].axis("off")
 
         if has_diff:
-            diff_path = output_dirs['diff'] / tile_name
+            diff_path = output_dirs["diff"] / tile_name
             if diff_path.exists():
                 diff_img = cv2.imread(str(diff_path))
                 diff_img = cv2.cvtColor(diff_img, cv2.COLOR_BGR2RGB)
                 axes[idx, 4].imshow(diff_img)
                 axes[idx, 4].set_title("Change (Diff)")
             else:
-                axes[idx, 4].text(0.5, 0.5, "N/A", ha='center', va='center')
-            axes[idx, 4].axis('off')
+                axes[idx, 4].text(0.5, 0.5, "N/A", ha="center", va="center")
+            axes[idx, 4].axis("off")
 
     legend_elements = [
-        plt.Rectangle((0, 0), 1, 1, facecolor=np.array(c)/255, label=l)
+        plt.Rectangle((0, 0), 1, 1, facecolor=np.array(c) / 255, label=l)
         for l, c in [
             ("Background", [0, 0, 0]),
             ("No Damage", [0, 255, 0]),
@@ -907,13 +935,19 @@ def visualize_samples(output_dirs: Dict[str, Path], num_samples: int = 3, show_d
             ("Destroyed", [255, 0, 0]),
         ]
     ]
-    fig.legend(handles=legend_elements, loc='lower center', ncol=5, fontsize=10)
+    fig.legend(handles=legend_elements, loc="lower center", ncol=5, fontsize=10)
 
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.08)
-    plt.savefig(output_dirs['pre'].parent / "sample_visualization.png", dpi=150, bbox_inches='tight')
+    plt.savefig(
+        output_dirs["pre"].parent / "sample_visualization.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
     plt.show()
-    print(f"[INFO] Visualization saved to {output_dirs['pre'].parent / 'sample_visualization.png'}")
+    print(
+        f"[INFO] Visualization saved to {output_dirs['pre'].parent / 'sample_visualization.png'}"
+    )
 
 
 def print_class_weights(stats: Dict):
@@ -923,14 +957,14 @@ def print_class_weights(stats: Dict):
     Args:
         stats: Dataset statistics dictionary
     """
-    if not stats or not stats.get('class_counts'):
+    if not stats or not stats.get("class_counts"):
         return
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("RECOMMENDED CLASS WEIGHTS (for imbalanced training)")
-    print("="*60)
+    print("=" * 60)
 
-    class_counts = stats['class_counts']
+    class_counts = stats["class_counts"]
 
     # Remove background for weight calculation
     building_classes = {k: v for k, v in class_counts.items() if k > 0}
@@ -973,13 +1007,17 @@ def print_class_weights(stats: Dict):
 # SINGLE TIER PROCESSING
 # ============================================================================
 
-def preprocess_single_tier(input_path: Path,
-                           output_path: Path,
-                           tier_name: str,
-                           debug: bool = False,
-                           debug_limit: int = None,
-                           save_diff: bool = True,
-                           verbose: bool = False) -> Dict:
+
+def preprocess_single_tier(
+    input_path: Path,
+    output_path: Path,
+    tier_name: str,
+    debug: bool = False,
+    debug_limit: int = None,
+    save_diff: bool = True,
+    verbose: bool = False,
+    clean_output: bool = False,
+) -> Dict:
     """
     Process a single tier of the dataset.
 
@@ -991,29 +1029,39 @@ def preprocess_single_tier(input_path: Path,
         debug_limit: Number of scenes in debug mode
         save_diff: Save diff channel
         verbose: Print detailed debug info
+        clean_output: Clean existing output directories before processing
 
     Returns:
         Statistics dictionary for this tier
     """
     debug_limit = debug_limit or Config.DEBUG_LIMIT
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print(f"PROCESSING {tier_name.upper()}")
-    print("="*60)
+    print("=" * 60)
     print(f"Input path: {input_path}")
     print(f"Output path: {output_path}")
     print(f"Debug mode: {debug} (limit: {debug_limit if debug else 'N/A'})")
-    print("="*60)
+    print("=" * 60)
 
     # Create output directories
     output_dirs = {
-        'pre': output_path / 'pre',
-        'post': output_path / 'post',
-        'masks': output_path / 'masks',
+        "pre": output_path / "pre",
+        "post": output_path / "post",
+        "masks": output_path / "masks",
     }
 
     if save_diff:
-        output_dirs['diff'] = output_path / 'diff'
+        output_dirs["diff"] = output_path / "diff"
+
+    # FIX 5: Clean existing output directories if requested to prevent stale data
+    if clean_output:
+        import shutil
+
+        for dir_path in output_dirs.values():
+            if dir_path.exists():
+                shutil.rmtree(dir_path)
+                print(f"[INFO] Cleaned existing directory: {dir_path}")
 
     for dir_path in output_dirs.values():
         dir_path.mkdir(parents=True, exist_ok=True)
@@ -1032,17 +1080,19 @@ def preprocess_single_tier(input_path: Path,
     if verbose or debug:
         print("\n[DEBUG] Looking for a JSON with features to analyze...")
         for scene_id, scene_files in list(scenes.items())[:20]:
-            json_data = load_json(scene_files['json'])
+            json_data = load_json(scene_files["json"])
             if json_data:
                 features = extract_features_from_json(json_data)
                 if features:
-                    print(f"[DEBUG] Found JSON with {len(features)} features: {scene_files['json']}")
-                    debug_analyze_json(scene_files['json'])
+                    print(
+                        f"[DEBUG] Found JSON with {len(features)} features: {scene_files['json']}"
+                    )
+                    debug_analyze_json(scene_files["json"])
                     break
         else:
             # If no JSON with features found, just show first one
             first_scene = list(scenes.values())[0]
-            debug_analyze_json(first_scene['json'])
+            debug_analyze_json(first_scene["json"])
 
     if debug:
         scene_ids = list(scenes.keys())[:debug_limit]
@@ -1058,10 +1108,12 @@ def preprocess_single_tier(input_path: Path,
     for scene_id, files in tqdm(scenes.items(), desc=f"Processing {tier_name}"):
         try:
             tiles_saved, tiles_skipped = process_scene(
-                scene_id, files, output_dirs,
+                scene_id,
+                files,
+                output_dirs,
                 save_diff=save_diff,
                 tier_prefix=tier_prefix,
-                verbose=verbose
+                verbose=verbose,
             )
             total_tiles += tiles_saved
             total_skipped += tiles_skipped
@@ -1072,6 +1124,7 @@ def preprocess_single_tier(input_path: Path,
         except Exception as e:
             print(f"\n[ERROR] Failed to process {scene_id}: {e}")
             import traceback
+
             traceback.print_exc()
             continue
 
@@ -1082,10 +1135,10 @@ def preprocess_single_tier(input_path: Path,
 
     # Compute statistics
     stats = compute_dataset_stats(output_dirs)
-    stats['tier'] = tier_name
-    stats['scenes_processed'] = len(scenes)
-    stats['tiles_skipped'] = total_skipped
-    stats['empty_mask_scenes'] = empty_mask_count
+    stats["tier"] = tier_name
+    stats["scenes_processed"] = len(scenes)
+    stats["tiles_skipped"] = total_skipped
+    stats["empty_mask_scenes"] = empty_mask_count
 
     return stats
 
@@ -1094,14 +1147,18 @@ def preprocess_single_tier(input_path: Path,
 # MULTI-TIER PROCESSING
 # ============================================================================
 
-def preprocess_all_tiers(input_base_path: Path = None,
-                         output_path: Path = None,
-                         tiers: List[str] = None,
-                         debug: bool = False,
-                         debug_limit: int = None,
-                         save_diff: bool = True,
-                         visualize: bool = True,
-                         verbose: bool = False):
+
+def preprocess_all_tiers(
+    input_base_path: Path = None,
+    output_path: Path = None,
+    tiers: List[str] = None,
+    debug: bool = False,
+    debug_limit: int = None,
+    save_diff: bool = True,
+    visualize: bool = True,
+    verbose: bool = False,
+    clean_output: bool = False,
+):
     """
     Process all tiers and output combined statistics.
 
@@ -1114,19 +1171,20 @@ def preprocess_all_tiers(input_base_path: Path = None,
         save_diff: Save diff channel
         visualize: Show sample visualizations
         verbose: Print detailed debug info
+        clean_output: Clean existing output directories before processing
     """
     input_base_path = input_base_path or Config.INPUT_BASE_PATH
     output_path = output_path or Config.OUTPUT_PATH
     tiers = tiers or Config.TIERS
 
-    print("="*60)
+    print("=" * 60)
     print("xBD MULTI-TIER DATASET PREPROCESSING")
-    print("="*60)
+    print("=" * 60)
     print(f"Input base path: {input_base_path}")
     print(f"Output path: {output_path}")
     print(f"Tiers to process: {tiers}")
     print(f"Save diff channel: {save_diff}")
-    print("="*60)
+    print("=" * 60)
 
     all_stats = []
     combined_output_dirs = None
@@ -1146,19 +1204,20 @@ def preprocess_all_tiers(input_base_path: Path = None,
             debug=debug,
             debug_limit=debug_limit,
             save_diff=save_diff,
-            verbose=verbose
+            verbose=verbose,
+            clean_output=clean_output,
         )
 
         if stats:
             all_stats.append(stats)
             # Store output dirs for visualization
             combined_output_dirs = {
-                'pre': tier_output_path / 'pre',
-                'post': tier_output_path / 'post',
-                'masks': tier_output_path / 'masks',
+                "pre": tier_output_path / "pre",
+                "post": tier_output_path / "post",
+                "masks": tier_output_path / "masks",
             }
             if save_diff:
-                combined_output_dirs['diff'] = tier_output_path / 'diff'
+                combined_output_dirs["diff"] = tier_output_path / "diff"
 
     # Print individual tier statistics
     for stats in all_stats:
@@ -1180,13 +1239,13 @@ def preprocess_all_tiers(input_base_path: Path = None,
     # Save statistics to JSON
     if all_stats:
         stats_output = {
-            'tiers': [s['tier'] for s in all_stats],
-            'individual': all_stats,
-            'combined': merge_stats(all_stats) if len(all_stats) > 1 else all_stats[0]
+            "tiers": [s["tier"] for s in all_stats],
+            "individual": all_stats,
+            "combined": merge_stats(all_stats) if len(all_stats) > 1 else all_stats[0],
         }
 
         stats_file = output_path / "combined" / "dataset_statistics.json"
-        with open(stats_file, 'w') as f:
+        with open(stats_file, "w") as f:
             json.dump(stats_output, f, indent=2)
         print(f"\n[INFO] Statistics saved to {stats_file}")
 
@@ -1195,13 +1254,16 @@ def preprocess_all_tiers(input_base_path: Path = None,
 # LEGACY SINGLE SPLIT PROCESSING (for backward compatibility)
 # ============================================================================
 
-def preprocess_dataset(input_path: Path = None,
-                       output_path: Path = None,
-                       split: str = "train",
-                       debug: bool = False,
-                       debug_limit: int = None,
-                       visualize: bool = True,
-                       save_diff: bool = None):
+
+def preprocess_dataset(
+    input_path: Path = None,
+    output_path: Path = None,
+    split: str = "train",
+    debug: bool = False,
+    debug_limit: int = None,
+    visualize: bool = True,
+    save_diff: bool = None,
+):
     """
     Legacy function for single split processing.
     For multi-tier processing, use preprocess_all_tiers() instead.
@@ -1219,21 +1281,21 @@ def preprocess_dataset(input_path: Path = None,
         tier_name=split,
         debug=debug,
         debug_limit=debug_limit,
-        save_diff=save_diff
+        save_diff=save_diff,
     )
 
     if stats:
         print_dataset_stats(stats)
         print_class_weights(stats)
 
-    if visualize and stats.get('total_tiles', 0) > 0:
+    if visualize and stats.get("total_tiles", 0) > 0:
         output_dirs = {
-            'pre': output_path / split / 'pre',
-            'post': output_path / split / 'post',
-            'masks': output_path / split / 'masks',
+            "pre": output_path / split / "pre",
+            "post": output_path / split / "post",
+            "masks": output_path / split / "masks",
         }
         if save_diff:
-            output_dirs['diff'] = output_path / split / 'diff'
+            output_dirs["diff"] = output_path / split / "diff"
 
         print("\n[INFO] Generating visualization...")
         visualize_samples(output_dirs, num_samples=3, show_diff=save_diff)
@@ -1247,26 +1309,29 @@ if __name__ == "__main__":
     # =========================================================
     # OPTION 1: Process ALL tiers (tier1 + tier3) combined
     # =========================================================
+    # FIX 1: Correct input path to match dataset location
     preprocess_all_tiers(
-        input_base_path=Path("/kaggle/input/xview2-challenge-dataset"),
+        input_base_path=Path("/kaggle/input/datasets/qianlanzz/xbd-dataset/xbd"),
         output_path=Path("/kaggle/working/processed_data"),
         tiers=["tier1", "tier3"],  # Process both tiers
-        debug=True,                # Set to True for testing first!
-        debug_limit=5,             # Test with 5 scenes first
+        debug=True,  # Set to True for testing first!
+        debug_limit=5,  # Test with 5 scenes first
         save_diff=True,
         visualize=True,
-        verbose=True               # Enable detailed logging
+        verbose=True,  # Enable detailed logging
+        clean_output=True,  # FIX 5: Clean existing output to prevent stale data
     )
 
     # =========================================================
     # OPTION 2: Full processing (after debug passes)
     # =========================================================
     # preprocess_all_tiers(
-    #     input_base_path=Path("/kaggle/input/xview2-challenge-dataset"),
+    #     input_base_path=Path("/kaggle/input/datasets/qianlanzz/xbd-dataset/xbd"),
     #     output_path=Path("/kaggle/working/processed_data"),
     #     tiers=["tier1", "tier3"],
     #     debug=False,
     #     save_diff=True,
     #     visualize=True,
-    #     verbose=False
+    #     verbose=False,
+    #     clean_output=True
     # )
