@@ -281,15 +281,24 @@ def extract_polygon_and_damage(feature: Dict) -> Tuple[Optional[str], Optional[s
     # FIX 3: Only use feature properties, no fallback to entire feature
     properties = feature.get("properties", {})
 
-    # FIX 2: Try to get WKT polygon - prioritize in order: ['wkt', 'feature_wkt', 'pixelWkt']
+    # FIX 2: Try to get WKT polygon - prioritize FEATURE LEVEL first, then properties level
     # Skip empty or null values
     for wkt_key in ["wkt", "feature_wkt", "pixelWkt"]:
-        if wkt_key in properties:
+        # Search WKT at FEATURE LEVEL first
+        if wkt_key in feature:
+            val = feature[wkt_key]
+
+        # fallback to properties level
+        elif wkt_key in properties:
             val = properties[wkt_key]
-            # Skip empty, null, or non-string values
-            if val and isinstance(val, str) and val.strip():
-                wkt_string = val
-                break
+
+        else:
+            continue
+
+        # Skip empty, null, or non-string values
+        if val and isinstance(val, str) and val.strip():
+            wkt_string = val
+            break
 
     # If no WKT, try geometry field
     if not wkt_string and "geometry" in feature:
