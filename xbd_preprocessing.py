@@ -1334,11 +1334,11 @@ if __name__ == "__main__":
         input_base_path=Path("/kaggle/input/datasets/qianlanzz/xbd-dataset/xbd"),
         output_path=Path("/kaggle/working/processed_data"),
         tiers=["tier1", "tier3"],  # Process both tiers
-        debug=True,  # Set to True for testing first!
+        debug=False,  # Set to True for testing first!
         debug_limit=5,  # Test with 5 scenes first
         save_diff=True,
         visualize=True,
-        verbose=True,  # Enable detailed logging
+        verbose=False,  # Enable detailed logging
         clean_output=True,  # FIX 1: Clean output directories once before processing
     )
 
