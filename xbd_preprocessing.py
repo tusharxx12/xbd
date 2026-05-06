@@ -192,7 +192,8 @@ def parse_polygons_from_wkt(wkt_string: str) -> List[np.ndarray]:
                     polygons.append(coords)
 
     except Exception as e:
-        pass
+        if Config.VERBOSE:
+            print(f"[WARNING] Failed parsing WKT: {e}")
 
     return polygons
 
@@ -399,16 +400,14 @@ def create_mask(
             f"Skipped (invalid): {skipped_invalid}"
         )
 
-    # FIX 4: Use np.maximum to ensure higher damage classes always overwrite lower ones
-    # Replace draw-order dependency with deterministic np.maximum approach
+    # FIX 5: OPTIMIZE MASK DRAWING PERFORMANCE
+    # Sort polygons by damage class (ascending) so higher classes overwrite lower classes naturally
+    # Remove temp mask creation for better performance
+    polygon_data.sort(key=lambda x: x[1])  # Sort by damage class (ascending)
     for coords, damage_class in polygon_data:
         coords = clip_coordinates(coords, height, width)
         polygon = coords.reshape((-1, 1, 2))
-        # Create temporary mask for this polygon
-        temp_mask = np.zeros((height, width), dtype=np.uint8)
-        cv2.fillPoly(temp_mask, [polygon], color=int(damage_class))
-        # Use np.maximum to ensure higher damage class wins
-        mask = np.maximum(mask, temp_mask)
+        cv2.fillPoly(mask, [polygon], color=int(damage_class))
 
     return mask
 
@@ -767,8 +766,13 @@ def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
     """
     tile_files = list(output_dirs["masks"].glob("*.png"))
 
+    # FIX 2: Return proper structure even when no tiles exist to avoid KeyError
     if not tile_files:
-        return {}
+        return {
+            "total_tiles": 0,
+            "total_pixels": 0,
+            "class_counts": {},
+        }
 
     class_counts = defaultdict(int)
     total_pixels = 0
@@ -777,9 +781,10 @@ def compute_dataset_stats(output_dirs: Dict[str, Path]) -> Dict:
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         unique, counts = np.unique(mask, return_counts=True)
 
+        # FIX 3: Convert numpy types to Python native types for JSON serialization
         for cls, cnt in zip(unique, counts):
-            class_counts[cls] += cnt
-            total_pixels += cnt
+            class_counts[int(cls)] += int(cnt)
+            total_pixels += int(cnt)
 
     return {
         "total_tiles": len(tile_files),
@@ -1063,15 +1068,6 @@ def preprocess_single_tier(
     if save_diff:
         output_dirs["diff"] = output_path / "diff"
 
-    # FIX 5: Clean existing output directories if requested to prevent stale data
-    if clean_output:
-        import shutil
-
-        for dir_path in output_dirs.values():
-            if dir_path.exists():
-                shutil.rmtree(dir_path)
-                print(f"[INFO] Cleaned existing directory: {dir_path}")
-
     for dir_path in output_dirs.values():
         dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -1195,6 +1191,22 @@ def preprocess_all_tiers(
     print(f"Save diff channel: {save_diff}")
     print("=" * 60)
 
+    # FIX 1: Move output cleaning logic here - clean ONLY ONCE before tier loop
+    if clean_output:
+        import shutil
+
+        combined_output_path = output_path / "combined"
+        dirs_to_clean = [
+            combined_output_path / "pre",
+            combined_output_path / "post",
+            combined_output_path / "masks",
+            combined_output_path / "diff",
+        ]
+        for dir_path in dirs_to_clean:
+            if dir_path.exists():
+                shutil.rmtree(dir_path)
+                print(f"[INFO] Cleaned existing directory: {dir_path}")
+
     all_stats = []
     combined_output_dirs = None
 
@@ -1214,7 +1226,6 @@ def preprocess_all_tiers(
             debug_limit=debug_limit,
             save_diff=save_diff,
             verbose=verbose,
-            clean_output=clean_output,
         )
 
         if stats:
@@ -1328,7 +1339,7 @@ if __name__ == "__main__":
         save_diff=True,
         visualize=True,
         verbose=True,  # Enable detailed logging
-        clean_output=True,  # FIX 5: Clean existing output to prevent stale data
+        clean_output=True,  # FIX 1: Clean output directories once before processing
     )
 
     # =========================================================
