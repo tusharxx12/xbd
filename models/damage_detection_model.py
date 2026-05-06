@@ -278,7 +278,8 @@ class SwinEncoderWrapper(nn.Module):
             pretrained=pretrained,
             in_chans=in_chans,
             features_only=True,
-            out_indices=(0, 1, 2, 3),  # Extract from all 4 stages
+            out_indices=(0, 1, 2, 3), 
+            img_size=512# Extract from all 4 stages
         )
 
         # Get feature channel dimensions
