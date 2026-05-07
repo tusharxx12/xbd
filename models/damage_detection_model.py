@@ -298,9 +298,13 @@ class SwinEncoderWrapper(nn.Module):
                 - Stage 3: (B, 384, H/16, W/16)
                 - Stage 4: (B, 768, H/32, W/32)
         """
+        
         features = self.backbone(x)
-        return features
 
+# Convert NHWC -> NCHW
+        features = [f.permute(0, 3, 1, 2).contiguous() for f in features]
+
+        return features
 
 class SatelliteDamageDetectionModel(nn.Module):
     """
