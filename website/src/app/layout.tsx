@@ -60,9 +60,9 @@ export default function RootLayout({
     >
       <head>
         <link rel="icon" href="/favicon.ico" sizes="any" />
-        <meta name="theme-color" content="#030014" />
+        <meta name="theme-color" content="#000000" />
       </head>
-      <body className="bg-[#030014] text-white font-sans antialiased overflow-x-hidden">
+      <body className="bg-black text-white font-sans antialiased overflow-x-hidden">
         {children}
       </body>
     </html>
