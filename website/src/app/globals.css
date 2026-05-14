@@ -411,6 +411,18 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Responsive */
+@media (max-width: 968px) {
+  .demo-grid {
+    grid-template-columns: 1fr !important;
+    gap: 32px !important;
+  }
+
+  .tech-grid {
+    grid-template-columns: 1fr !important;
+    gap: 48px !important;
+  }
+}
+
 @media (max-width: 768px) {
   .nav {
     padding: 16px 20px;
@@ -435,6 +447,16 @@ h1, h2, h3, h4, h5, h6 {
 
   .feature-card {
     padding: 24px;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+  }
+
+  .footer-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
   }
 }
 
