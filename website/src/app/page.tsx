@@ -56,8 +56,8 @@ function HeroSection() {
           for rapid post-disaster response
         </p>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <button className="btn-primary">Explore Research</button>
-          <button className="btn-secondary">View Demo</button>
+          <a href="#features" className="btn-primary">Explore Research</a>
+          <a href="#results" className="btn-secondary">View Demo</a>
         </div>
       </div>
 
@@ -261,8 +261,8 @@ function CTASection() {
           recover faster from natural disasters.
         </p>
         <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
-          <button className="btn-secondary">Get Started</button>
-          <button className="btn-primary">View Documentation</button>
+          <a href="#features" className="btn-secondary">Get Started</a>
+          <a href="#technology" className="btn-primary">View Documentation</a>
         </div>
       </div>
     </section>
