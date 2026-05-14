@@ -1,246 +1,349 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import HeroSection from '@/components/sections/HeroSection';
-import FeaturesSection from '@/components/sections/FeaturesSection';
-import TimelineSection from '@/components/sections/TimelineSection';
-import ResultsSection from '@/components/sections/ResultsSection';
-import CTASection from '@/components/sections/CTASection';
-import Footer from '@/components/sections/Footer';
+import Image from 'next/image';
 
-// Navigation component
-function Navigation({ scrollProgress }: { scrollProgress: number }) {
-  const [isScrolled, setIsScrolled] = useState(false);
+// Navigation Component
+function Navigation() {
+  const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
     const handleScroll = () => {
-      setIsScrolled(window.scrollY > 50);
+      setScrolled(window.scrollY > 50);
     };
     window.addEventListener('scroll', handleScroll);
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const navItems = [
-    { label: 'Features', href: '#features' },
-    { label: 'How It Works', href: '#timeline' },
-    { label: 'Results', href: '#results' },
-    { label: 'Get Started', href: '#cta' },
+  return (
+    <nav className={`nav ${scrolled ? 'scrolled' : ''}`}>
+      <div className="nav-logo">SatDamage</div>
+      <div className="nav-links">
+        <a href="#features" className="nav-link">Features</a>
+        <a href="#technology" className="nav-link">Technology</a>
+        <a href="#results" className="nav-link">Results</a>
+        <a href="https://github.com" className="nav-link">GitHub</a>
+      </div>
+    </nav>
+  );
+}
+
+// Hero Section
+function HeroSection() {
+  return (
+    <section className="section" style={{ minHeight: '100vh' }}>
+      <div className="section-bg">
+        <Image
+          src="/images/hero-earth.jpg"
+          alt="Earth from space"
+          fill
+          priority
+          style={{ objectFit: 'cover' }}
+        />
+        <div style={{
+          position: 'absolute',
+          inset: 0,
+          background: 'linear-gradient(to bottom, rgba(0,0,0,0.3), rgba(0,0,0,0.5))'
+        }} />
+      </div>
+
+      <div className="container" style={{ textAlign: 'center' }}>
+        <h1 className="hero-title">
+          Satellite<br />Damage Detection
+        </h1>
+        <p className="hero-subtitle">
+          AI-powered building damage assessment using satellite imagery
+          for rapid post-disaster response
+        </p>
+        <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <button className="btn-primary">Explore Research</button>
+          <button className="btn-secondary">View Demo</button>
+        </div>
+      </div>
+
+      <div className="scroll-indicator">
+        <span className="scroll-text">Scroll</span>
+        <div className="scroll-line" />
+      </div>
+    </section>
+  );
+}
+
+// Features Section
+function FeaturesSection() {
+  const features = [
+    {
+      number: '01',
+      title: 'Siamese Architecture',
+      description: 'Shared-weight Swin-Transformer encoder processes pre and post-disaster image pairs, extracting hierarchical features while maintaining temporal correspondence.'
+    },
+    {
+      number: '02',
+      title: 'Cross-Temporal Attention',
+      description: 'Novel attention mechanism where post-disaster features query pre-disaster context, explicitly modeling structural changes and damage patterns.'
+    },
+    {
+      number: '03',
+      title: 'Multi-Scale Analysis',
+      description: 'U-Net decoder with skip connections enables precise localization from building-level to pixel-level damage classification.'
+    },
+    {
+      number: '04',
+      title: 'Real-Time Inference',
+      description: 'Optimized pipeline with Test-Time Augmentation delivers production-ready performance for emergency response applications.'
+    }
   ];
 
   return (
-    <motion.nav
-      initial={{ y: -100, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ delay: 0.5, duration: 0.5 }}
-      className={`fixed top-0 left-0 right-0 z-50 transition-all duration-500 ${
-        isScrolled ? 'bg-black/80 backdrop-blur-xl border-b border-white/10' : ''
-      }`}
-    >
-      <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-        {/* Logo */}
-        <a href="#" className="flex items-center gap-3 group">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-purple-500 flex items-center justify-center transition-transform group-hover:scale-110">
-            <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064"
-              />
-            </svg>
-          </div>
-          <span className="text-lg font-bold text-white hidden sm:block">SatDamage</span>
-        </a>
-
-        {/* Nav Links */}
-        <div className="hidden md:flex items-center gap-8">
-          {navItems.map((item) => (
-            <a
-              key={item.label}
-              href={item.href}
-              className="text-gray-400 hover:text-white transition-colors text-sm font-medium"
-            >
-              {item.label}
-            </a>
-          ))}
-        </div>
-
-        {/* CTA Button */}
-        <a
-          href="https://github.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-purple-500 text-white text-sm font-medium rounded-full hover:shadow-lg hover:shadow-cyan-500/30 transition-all hover:scale-105"
-        >
-          View on GitHub
-        </a>
-      </div>
-
-      {/* Progress indicator */}
-      <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-white/5">
-        <motion.div
-          className="h-full bg-gradient-to-r from-cyan-500 to-purple-500"
-          style={{ width: `${scrollProgress * 100}%` }}
+    <section id="features" className="section" style={{ background: '#000' }}>
+      <div className="section-bg">
+        <Image
+          src="/images/satellite-view.jpg"
+          alt="Satellite view"
+          fill
+          style={{ objectFit: 'cover', opacity: 0.3 }}
         />
       </div>
-    </motion.nav>
+
+      <div className="container">
+        <span className="section-label">Capabilities</span>
+        <h2 className="section-title">
+          Advanced Deep Learning for Disaster Assessment
+        </h2>
+        <p className="section-description">
+          Our system leverages state-of-the-art computer vision to automatically
+          detect and classify building damage from satellite imagery.
+        </p>
+
+        <div className="feature-grid">
+          {features.map((feature) => (
+            <div key={feature.number} className="feature-card">
+              <div className="feature-number">{feature.number}</div>
+              <h3 className="feature-title">{feature.title}</h3>
+              <p className="feature-description">{feature.description}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
-// Animated background with particles
-function AnimatedBackground() {
+// Technology Section
+function TechnologySection() {
+  const steps = [
+    {
+      step: 'Step 01',
+      title: 'Image Acquisition',
+      description: 'High-resolution satellite imagery is collected from pre and post-disaster timeframes, capturing the affected regions.'
+    },
+    {
+      step: 'Step 02',
+      title: 'Preprocessing Pipeline',
+      description: 'Images are tiled, aligned, and normalized. Building polygons are extracted and damage masks are generated for training.'
+    },
+    {
+      step: 'Step 03',
+      title: 'Feature Extraction',
+      description: 'Siamese Swin-Transformer encodes both images simultaneously, extracting multi-scale features with shared weights.'
+    },
+    {
+      step: 'Step 04',
+      title: 'Change Detection',
+      description: 'Cross-temporal attention and Diff-CNN branches identify structural changes between the image pairs.'
+    },
+    {
+      step: 'Step 05',
+      title: 'Damage Classification',
+      description: 'U-Net decoder produces pixel-wise segmentation across 4 damage classes: No Damage, Minor, Major, Destroyed.'
+    }
+  ];
+
   return (
-    <div className="fixed inset-0 z-0 overflow-hidden">
-      {/* Base gradient */}
-      <div className="absolute inset-0 bg-gradient-to-b from-[#030014] via-[#0a0a1f] to-[#030014]" />
-
-      {/* Animated gradient orbs */}
-      <div className="absolute top-1/4 -left-1/4 w-[600px] h-[600px] rounded-full bg-cyan-500/10 blur-[120px] animate-pulse" />
-      <div className="absolute bottom-1/4 -right-1/4 w-[600px] h-[600px] rounded-full bg-purple-500/10 blur-[120px] animate-pulse" style={{ animationDelay: '1s' }} />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-blue-500/5 blur-[150px] animate-pulse" style={{ animationDelay: '2s' }} />
-
-      {/* Grid overlay */}
-      <div
-        className="absolute inset-0 opacity-[0.03]"
-        style={{
-          backgroundImage: `linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)`,
-          backgroundSize: '50px 50px'
-        }}
-      />
-
-      {/* Floating particles */}
-      <div className="absolute inset-0">
-        {[...Array(30)].map((_, i) => (
-          <motion.div
-            key={i}
-            className="absolute w-1 h-1 bg-cyan-400/50 rounded-full"
-            initial={{
-              x: Math.random() * (typeof window !== 'undefined' ? window.innerWidth : 1000),
-              y: Math.random() * (typeof window !== 'undefined' ? window.innerHeight : 800),
-            }}
-            animate={{
-              y: [null, Math.random() * -200 - 100],
-              opacity: [0.2, 0.8, 0.2],
-            }}
-            transition={{
-              duration: 5 + Math.random() * 5,
-              repeat: Infinity,
-              delay: Math.random() * 5,
-            }}
-          />
-        ))}
+    <section id="technology" className="section" style={{ background: '#000' }}>
+      <div className="section-bg">
+        <Image
+          src="/images/space-stars.jpg"
+          alt="Space background"
+          fill
+          style={{ objectFit: 'cover', opacity: 0.4 }}
+        />
       </div>
 
-      {/* Stars */}
-      <div className="absolute inset-0">
-        {[...Array(100)].map((_, i) => (
-          <div
-            key={i}
-            className="absolute w-[2px] h-[2px] bg-white rounded-full"
-            style={{
-              left: `${Math.random() * 100}%`,
-              top: `${Math.random() * 100}%`,
-              opacity: Math.random() * 0.5 + 0.1,
-              animation: `twinkle ${2 + Math.random() * 3}s infinite ${Math.random() * 2}s`
-            }}
-          />
-        ))}
+      <div className="container">
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '80px', alignItems: 'start' }}>
+          <div>
+            <span className="section-label">How It Works</span>
+            <h2 className="section-title">End-to-End Processing Pipeline</h2>
+            <p className="section-description" style={{ marginBottom: 0 }}>
+              From raw satellite imagery to actionable damage assessments in minutes,
+              not days. Our automated pipeline enables rapid disaster response.
+            </p>
+          </div>
+
+          <div className="timeline">
+            {steps.map((item, index) => (
+              <div key={index} className="timeline-item">
+                <div className="timeline-step">{item.step}</div>
+                <h3 className="timeline-title">{item.title}</h3>
+                <p className="timeline-description">{item.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-// Main page component
-export default function Home() {
-  const [scrollProgress, setScrollProgress] = useState(0);
-  const [mounted, setMounted] = useState(false);
+// Results Section
+function ResultsSection() {
+  const stats = [
+    { value: '94.2%', label: 'Overall Accuracy' },
+    { value: '0.89', label: 'Mean F1 Score' },
+    { value: '0.82', label: 'Mean IoU' },
+    { value: '<2s', label: 'Inference Time' }
+  ];
 
-  useEffect(() => {
-    setMounted(true);
-  }, []);
-
-  // Track scroll position
-  useEffect(() => {
-    const handleScroll = () => {
-      const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
-      const progress = scrollHeight > 0 ? window.scrollY / scrollHeight : 0;
-      setScrollProgress(Math.min(1, Math.max(0, progress)));
-    };
-
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll(); // Initial call
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
-
-  if (!mounted) {
-    return (
-      <div className="min-h-screen bg-[#030014] flex items-center justify-center">
-        <div className="w-16 h-16 border-4 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin" />
+  return (
+    <section id="results" className="section" style={{ background: '#000' }}>
+      <div className="section-bg">
+        <Image
+          src="/images/city-lights.jpg"
+          alt="City lights from space"
+          fill
+          style={{ objectFit: 'cover', opacity: 0.4 }}
+        />
       </div>
-    );
-  }
 
+      <div className="container" style={{ textAlign: 'center' }}>
+        <span className="section-label">Performance</span>
+        <h2 className="section-title" style={{ margin: '0 auto 24px', textAlign: 'center' }}>
+          State-of-the-Art Results on xBD Dataset
+        </h2>
+        <p className="section-description" style={{ margin: '0 auto 64px', textAlign: 'center' }}>
+          Validated on the xView2 Building Damage Assessment challenge dataset,
+          the largest public dataset for building damage detection.
+        </p>
+
+        <div className="stats-grid">
+          {stats.map((stat, index) => (
+            <div key={index}>
+              <div className="stat-value">{stat.value}</div>
+              <div className="stat-label">{stat.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// CTA Section
+function CTASection() {
+  return (
+    <section className="section" style={{ background: '#000', minHeight: 'auto', padding: '160px 24px' }}>
+      <div className="section-bg">
+        <Image
+          src="/images/earth-atmosphere.jpg"
+          alt="Earth atmosphere"
+          fill
+          style={{ objectFit: 'cover', opacity: 0.5 }}
+        />
+      </div>
+
+      <div className="container" style={{ textAlign: 'center' }}>
+        <h2 className="section-title" style={{ margin: '0 auto 24px', textAlign: 'center', maxWidth: '700px' }}>
+          Ready to Accelerate Disaster Response?
+        </h2>
+        <p className="section-description" style={{ margin: '0 auto 48px', textAlign: 'center' }}>
+          Access our research, models, and code to help communities
+          recover faster from natural disasters.
+        </p>
+        <div style={{ display: 'flex', gap: '16px', justifyContent: 'center', flexWrap: 'wrap' }}>
+          <button className="btn-secondary">Get Started</button>
+          <button className="btn-primary">View Documentation</button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Footer
+function Footer() {
+  return (
+    <footer className="footer">
+      <div className="container">
+        <div className="footer-grid">
+          <div>
+            <div className="nav-logo" style={{ marginBottom: '20px' }}>SatDamage</div>
+            <p style={{ color: 'var(--color-text-muted)', fontSize: '14px', maxWidth: '300px', lineHeight: 1.7 }}>
+              AI-powered satellite imagery analysis for building damage assessment
+              and disaster response.
+            </p>
+          </div>
+
+          <div>
+            <div className="footer-title">Research</div>
+            <a href="#" className="footer-link">Documentation</a>
+            <a href="#" className="footer-link">Model Architecture</a>
+            <a href="#" className="footer-link">Dataset</a>
+            <a href="#" className="footer-link">Publications</a>
+          </div>
+
+          <div>
+            <div className="footer-title">Resources</div>
+            <a href="#" className="footer-link">GitHub</a>
+            <a href="#" className="footer-link">API Reference</a>
+            <a href="#" className="footer-link">Examples</a>
+            <a href="#" className="footer-link">Tutorials</a>
+          </div>
+
+          <div>
+            <div className="footer-title">Connect</div>
+            <a href="#" className="footer-link">Twitter</a>
+            <a href="#" className="footer-link">LinkedIn</a>
+            <a href="#" className="footer-link">Email</a>
+            <a href="#" className="footer-link">Discord</a>
+          </div>
+        </div>
+
+        <div style={{
+          marginTop: '60px',
+          paddingTop: '30px',
+          borderTop: '1px solid var(--color-border)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: '20px'
+        }}>
+          <span style={{ fontSize: '13px', color: 'var(--color-text-muted)' }}>
+            © 2024 Satellite Damage Detection. All rights reserved.
+          </span>
+          <div style={{ display: 'flex', gap: '24px' }}>
+            <a href="#" className="footer-link" style={{ marginBottom: 0 }}>Privacy</a>
+            <a href="#" className="footer-link" style={{ marginBottom: 0 }}>Terms</a>
+          </div>
+        </div>
+      </div>
+    </footer>
+  );
+}
+
+// Main Page
+export default function Home() {
   return (
     <>
-      {/* Animated Background */}
-      <AnimatedBackground />
-
-      {/* Navigation */}
-      <Navigation scrollProgress={scrollProgress} />
-
-      {/* Main Content */}
-      <main className="relative z-10">
-        {/* Hero Section */}
+      <Navigation />
+      <main>
         <HeroSection />
-
-        {/* Features Section */}
-        <section id="features">
-          <FeaturesSection />
-        </section>
-
-        {/* Timeline Section */}
-        <section id="timeline">
-          <TimelineSection />
-        </section>
-
-        {/* Results Section */}
-        <section id="results">
-          <ResultsSection />
-        </section>
-
-        {/* CTA Section */}
-        <section id="cta">
-          <CTASection />
-        </section>
-
-        {/* Footer */}
-        <Footer />
+        <FeaturesSection />
+        <TechnologySection />
+        <ResultsSection />
+        <CTASection />
       </main>
-
-      {/* Scroll indicator */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: scrollProgress > 0.02 ? 0 : 1 }}
-        className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2"
-      >
-        <span className="text-gray-500 text-xs uppercase tracking-widest">Scroll to explore</span>
-        <motion.div
-          animate={{ y: [0, 8, 0] }}
-          transition={{ duration: 1.5, repeat: Infinity }}
-          className="w-6 h-10 border-2 border-white/20 rounded-full flex items-start justify-center p-2"
-        >
-          <motion.div className="w-1.5 h-1.5 bg-cyan-400 rounded-full" />
-        </motion.div>
-      </motion.div>
-
-      {/* Add twinkle animation */}
-      <style jsx global>{`
-        @keyframes twinkle {
-          0%, 100% { opacity: 0.1; }
-          50% { opacity: 0.8; }
-        }
-      `}</style>
+      <Footer />
     </>
   );
 }
